@@ -1,9 +1,9 @@
 package network
 
 import (
+	"log"
+
 	"github.com/anviod/bacnet"
-	log "github.com/anviod/bacnet/helpers/log"
-	"go.uber.org/zap"
 )
 
 type Network struct {
@@ -37,10 +37,10 @@ func New(net *Network) (*Network, error) {
 
 func (net *Network) NetworkClose() {
 	if net.Client != nil {
-		log.Logger.Info("close bacnet network")
+		log.Printf("close bacnet network")
 		err := net.Client.Close()
 		if err != nil {
-			log.Logger.Error("close bacnet network failed", zap.Error(err))
+			log.Printf("close bacnet network err:%s", err.Error())
 			return
 		}
 	}
@@ -59,4 +59,6 @@ func (net *Network) NetworkRun() {
 	}
 }
 
+// func (net *Network) store() {
 
+// }

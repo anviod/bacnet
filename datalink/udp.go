@@ -3,12 +3,57 @@ package datalink
 import (
 	"context"
 	"fmt"
+	//"log"
 	"net"
 	"strings"
 	"syscall"
 
 	"github.com/anviod/bacnet/btypes"
 )
+
+// GetLocalIP returns a non-loopback IPv4 address of the local machine.
+// Returns "0.0.0.0" if no suitable address is found.
+func GetLocalIP() net.IP {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return net.IPv4(0, 0, 0, 0)
+	}
+	var fallback net.IP
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			var ones int
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+				ones, _ = v.Mask.Size()
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			ip = ip.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			if fallback == nil {
+				fallback = ip
+			}
+			if ones > 0 && ones < 32 {
+				return ip
+			}
+		}
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return net.IPv4(0, 0, 0, 0)
+}
 
 // DefaultPort that BacnetIP will use if a port is not given. Valid ports for
 // the bacnet protocol is between 0xBAC0 and 0xBAC9
@@ -80,6 +125,16 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 		broadcast[i] = ipNet.IP[i] | ^ipNet.Mask[i]
 	}
 
+	// If IP is 0.0.0.0, use a real local IP for the source address
+	// This ensures BACnet devices can respond to our NPDU source address
+	actualIP := ip
+	if ip.IsUnspecified() {
+		actualIP = GetLocalIP()
+		if actualIP.IsUnspecified() {
+			actualIP = ip // fallback to 0.0.0.0 if no local IP found
+		}
+	}
+
 	udpAddrStr := fmt.Sprintf("%s:%d", ip.String(), port)
 
 	lc := net.ListenConfig{
@@ -102,10 +157,12 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 
 	udpConn := conn.(*net.UDPConn)
 
+	//log.Printf("[DEBUG] UDP DataLink listening on %s:%d (Broadcast: %s)\n", ipAddr, port, broadcast.String())
+
 	return &udpDataLink{
 		listener:         udpConn,
 		port:             port,
-		myAddress:        IPPortToAddress(ip, port),
+		myAddress:        IPPortToAddress(actualIP, port),
 		broadcastAddress: IPPortToAddress(broadcast, DefaultPort),
 	}, nil
 }
@@ -122,6 +179,7 @@ func (c *udpDataLink) Receive(data []byte) (*btypes.Address, int, error) {
 	if err != nil {
 		return nil, n, err
 	}
+	//log.Printf("[DEBUG] UDP Received %d bytes from %s\n", n, adr.String())
 	adr.IP = adr.IP.To4()
 	udpAddr := UDPToAddress(adr)
 	return udpAddr, n, nil
@@ -142,6 +200,7 @@ func (c *udpDataLink) Send(data []byte, npdu *btypes.NPDU, dest *btypes.Address)
 	if err != nil {
 		return 0, err
 	}
+	//log.Printf("[DEBUG] UDP Sending %d bytes to %s\n", len(data), d.String())
 	return c.listener.WriteTo(data, &d)
 }
 

@@ -59,6 +59,7 @@ func DefaultSubscriberLastReceivedTimeout(timeout time.Duration) ManagerOption {
 }
 
 func (m *Manager) Publish(id int, data interface{}) {
+	// fmt.Printf("publish data: %s", pprint.ToJOSN(data))
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 

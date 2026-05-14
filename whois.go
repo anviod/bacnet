@@ -1,9 +1,10 @@
 package bacnet
 
 import (
+	"time"
+
 	"github.com/anviod/bacnet/btypes"
 	"github.com/anviod/bacnet/encoding"
-	"time"
 )
 
 type WhoIsOpts struct {
@@ -17,23 +18,24 @@ type WhoIsOpts struct {
 // WhoIs finds all devices with ids between the provided low and high values.
 // Use constant ArrayAll for both fields to scan the entire network at once.
 // Using ArrayAll is highly discouraged for most networks since it can lead
-// to a high congested network.
+// to a highly congested network.
 func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 	dest := *c.dataLink.GetBroadcastAddress()
 	if wh.Destination != nil {
 		dest = *wh.Destination
 	}
+
 	enc := encoding.NewEncoder()
 	low := wh.Low
 	high := wh.High
 	if wh.GlobalBroadcast {
-		wh.NetworkNumber = btypes.GlobalBroadcast //65535
+		wh.NetworkNumber = btypes.GlobalBroadcast
 	}
 	if low <= 0 {
 		low = 0
 	}
 	if high <= 0 {
-		high = 4194304 //max dev id
+		high = 4194304
 	}
 
 	dest.Net = wh.NetworkNumber
@@ -42,17 +44,16 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 		Destination:           &dest,
 		Source:                c.dataLink.GetMyAddress(),
 		IsNetworkLayerMessage: false,
-		// We are not expecting a direct reply from a single destination
-		ExpectingReply: false,
-		Priority:       btypes.Normal,
-		HopCount:       btypes.DefaultHopCount,
+		ExpectingReply:        false,
+		Priority:              btypes.Normal,
+		HopCount:              btypes.DefaultHopCount,
 	}
 	enc.NPDU(npdu)
 	err := enc.WhoIs(int32(low), int32(high))
 	if err != nil {
 		return nil, err
 	}
-	// Subscribe to any changes in the range. If it is a broadcast,
+
 	var start, end int
 	if low == -1 || high == -1 {
 		start = 0
@@ -61,7 +62,7 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 		start = low
 		end = high
 	}
-	// Run in parallel
+
 	errChan := make(chan error)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -76,37 +77,43 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Weed out values that are not important such as non object type
-	// and that are not
+
 	uniqueMap := make(map[btypes.ObjectInstance]btypes.Device)
-	uniqueList := make([]btypes.Device, len(uniqueMap))
+	var uniqueList []btypes.Device
 
 	for _, v := range values {
-
-		r, ok := v.(btypes.IAm)
-		// Skip non I AM responses
+		iam, ok := v.(btypes.IAm)
 		if !ok {
 			continue
 		}
-		// Check to see if we are in the map before inserting
-		if _, ok := uniqueMap[r.ID.Instance]; !ok {
-			dev := btypes.Device{
-				DeviceID:     int(r.ID.Instance),
-				Addr:         r.Addr,
-				ID:           r.ID,
-				MaxApdu:      r.MaxApdu,
-				Segmentation: r.Segmentation,
-				Vendor:       r.Vendor,
-			}
-			ip, err := r.Addr.UDPAddr()
-			if err == nil {
-				dev.Ip = ip.IP.String()
-				dev.Port = ip.Port
-			}
-
-			uniqueMap[r.ID.Instance] = btypes.Device(dev)
-			uniqueList = append(uniqueList, dev)
+		if _, ok := uniqueMap[iam.ID.Instance]; ok {
+			continue
 		}
+
+		dev := btypes.Device{
+			DeviceID:     int(iam.ID.Instance),
+			Addr:         iam.Addr,
+			ID:           iam.ID,
+			MaxApdu:      iam.MaxApdu,
+			Segmentation: iam.Segmentation,
+			Vendor:       iam.Vendor,
+		}
+
+		// Some BACnet/IP stacks send I-Am from an ephemeral UDP source port while
+		// still accepting confirmed services on the configured BACnet/IP port.
+		// When the caller used a unicast Who-Is destination, keep that address as
+		// the confirmed-service destination instead of blindly copying the I-Am
+		// packet source address.
+		if wh.Destination != nil && !wh.Destination.IsBroadcast() {
+			dev.Addr = *wh.Destination
+		}
+		if udpAddr, err := dev.Addr.UDPAddr(); err == nil {
+			dev.Ip = udpAddr.IP.String()
+			dev.Port = udpAddr.Port
+		}
+
+		uniqueMap[iam.ID.Instance] = dev
+		uniqueList = append(uniqueList, dev)
 	}
 	return uniqueList, err
 }

@@ -3,11 +3,11 @@ package network
 import (
 	"fmt"
 
+	"log"
+
 	"github.com/anviod/bacnet"
 	"github.com/anviod/bacnet/btypes"
-	log "github.com/anviod/bacnet/helpers/log"
 	pprint "github.com/anviod/bacnet/helpers/print"
-	"go.uber.org/zap"
 )
 
 type DevicePoints struct {
@@ -74,7 +74,7 @@ func (device *Device) GetDeviceDetails(deviceID btypes.ObjectInstance) (resp *De
 		fmt.Println(i, "Loop Props:", prop, " deviceID:", obj.ObjectID, "objectType:", obj.ObjectType, "prop:", obj.Prop)
 		read, err := device.Read(obj)
 		if err != nil {
-			log.Logger.Error("bacnet-master-GetDeviceDetails() error", zap.Error(err))
+			log.Printf("bacnet-master-GetDeviceDetails() error: %v", err)
 		}
 		switch prop {
 		case btypes.PropObjectName:
@@ -89,7 +89,8 @@ func (device *Device) GetDeviceDetails(deviceID btypes.ObjectInstance) (resp *De
 			resp.ProtocolServicesSupported = device.ToBitString(read)
 		}
 	}
-	log.Logger.Info("bacnet-device details", zap.String("name", resp.Name), zap.String("vendorName", resp.VendorName))
+	log.Printf("[INFO] bacnet-device name: %v", resp.Name)
+	log.Printf("[INFO] bacnet-device vendor-name: %v", resp.VendorName)
 	return resp, nil
 }
 

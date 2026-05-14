@@ -94,6 +94,7 @@ func TestReadObj(t *testing.T) {
 	out, err := device.Read(obj)
 	fmt.Println(err)
 	fmt.Println(out)
+	//fmt.Println("DATA", out.Object.Properties[0].Data)
 
 }
 

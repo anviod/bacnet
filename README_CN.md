@@ -243,6 +243,122 @@ func readMultiplePoints(client bacnet.Client, device btypes.Device) {
 }
 ```
 
+### 扫描设备所有对象
+
+```go
+// 扫描设备中的所有对象
+func scanDeviceObjects(client bacnet.Client, device btypes.Device) error {
+    // 获取设备中的所有对象
+    scannedDevice, err := client.Objects(device)
+    if err != nil {
+        return fmt.Errorf("扫描对象失败: %v", err)
+    }
+
+    fmt.Printf("在设备 %d 中发现 %d 个对象\n", device.DeviceID, scannedDevice.Objects.Len())
+
+    // 遍历所有对象类型
+    objectTypes := []btypes.ObjectType{
+        btypes.AnalogInput,
+        btypes.AnalogOutput,
+        btypes.AnalogValue,
+        btypes.BinaryInput,
+        btypes.BinaryOutput,
+        btypes.BinaryValue,
+    }
+
+    for _, objType := range objectTypes {
+        objects := scannedDevice.Objects[objType]
+        if len(objects) == 0 {
+            continue
+        }
+
+        fmt.Printf("\n%s 对象:\n", objType)
+        for instance, obj := range objects {
+            fmt.Printf("  实例 %d: Name=%q\n", instance, obj.Name)
+        }
+    }
+
+    return nil
+}
+```
+
+### 完整设备集成流程
+
+```go
+// 完整流程: 发现设备 -> 扫描对象 -> 读取值 -> 写入值
+func completeIntegration(client bacnet.Client) error {
+    // 步骤 1: 发现设备
+    devices, err := client.WhoIs(&bacnet.WhoIsOpts{
+        Low:  2228316,
+        High: 2228316,
+    })
+    if err != nil {
+        return fmt.Errorf("WhoIs 失败: %v", err)
+    }
+    if len(devices) == 0 {
+        return fmt.Errorf("未发现设备")
+    }
+
+    device := devices[0]
+    fmt.Printf("发现设备: ID=%d, IP=%s:%d\n", device.DeviceID, device.Ip, device.Port)
+
+    // 步骤 2: 扫描对象
+    scannedDevice, err := client.Objects(device)
+    if err != nil {
+        return fmt.Errorf("对象扫描失败: %v", err)
+    }
+
+    // 步骤 3: 查找目标点位
+    aiObjects := scannedDevice.Objects[btypes.AnalogInput]
+    targetPoint, ok := aiObjects[0] // AnalogInput:0
+    if !ok {
+        return fmt.Errorf("未找到目标点位 AnalogInput:0")
+    }
+    fmt.Printf("发现目标点位: %s\n", targetPoint.Name)
+
+    // 步骤 4: 读取当前值
+    result, err := client.ReadProperty(device, btypes.PropertyData{
+        Object: btypes.Object{
+            ID: btypes.ObjectID{
+                Type:     btypes.AnalogInput,
+                Instance: 0,
+            },
+            Properties: []btypes.Property{
+                {Type: btypes.PropPresentValue},
+            },
+        },
+    })
+    if err != nil {
+        return fmt.Errorf("读取属性失败: %v", err)
+    }
+    fmt.Printf("当前值: %v\n", result.Object.Properties[0].Data)
+
+    // 步骤 5: 写入 AnalogValue
+    writeErr := client.WriteProperty(device, btypes.PropertyData{
+        Object: btypes.Object{
+            ID: btypes.ObjectID{
+                Type:     btypes.AnalogValue,
+                Instance: 1,
+            },
+            Properties: []btypes.Property{
+                {
+                    Type:       btypes.PropPresentValue,
+                    ArrayIndex: btypes.ArrayAll,
+                    Data:       float64(25.5),
+                    Priority:   btypes.Normal,
+                },
+            },
+        },
+    })
+    if writeErr != nil {
+        return fmt.Errorf("写入属性失败: %v", writeErr)
+    }
+    fmt.Println("写入成功")
+
+    return nil
+}
+```
+
 ## API 参考
 
 ### 客户端接口
@@ -701,6 +817,71 @@ const (
     Normal            = 0  // 正常
 )
 ```
+
+## 使用注意事项
+
+### 网络注意事项
+
+1. **端口绑定**:
+   - 默认 BACnet 端口是 47808 (0xBAC0)
+   - 当在同一机器上与模拟器测试时，使用不同端口进行发现和确认服务以避免端口冲突
+   - 示例: 使用端口 47808 进行 WhoIs 发现，然后切换到 47809 进行 ReadProperty/WriteProperty 操作
+
+2. **IP 地址绑定**:
+   - 绑定到 `0.0.0.0` 以监听所有接口
+   - 避免绑定到目标设备的 IP 地址
+   - 对于多子网环境，确保正确配置子网 CIDR
+
+3. **广播行为**:
+   - WhoIs 默认使用广播
+   - 使用 `WhoIsOpts.Destination` 进行单播 WhoIs 请求
+   - 广播可能无法跨 VLAN 或子网工作
+
+### 错误处理
+
+1. **超时处理**:
+   - 使用 `ReadPropertyWithTimeout` 进行显式超时控制
+   - 确认服务包含带指数退避的重试逻辑
+   - 非确认服务没有重试机制
+
+2. **常见错误**:
+   - `timeout`: 设备未在超时时间内响应
+   - `invalid argument`: 无效的对象类型或属性 ID
+   - `no such object`: 请求的对象在设备上不存在
+   - `access denied`: 写入操作权限不足
+
+3. **重试策略**:
+   - 确认服务默认最多重试 2 次
+   - 对于关键操作，考虑实现应用级重试
+
+### 性能考虑
+
+1. **批量操作**:
+   - 使用 `ReadMultiProperty` 一次性读取多个属性
+   - 这减少了网络往返次数并提高性能
+   - 根据设备的 MaxAPDU 设置限制批处理大小
+
+2. **并发**:
+   - 客户端支持并发操作的线程安全设计
+   - TSM 限制并发确认事务数 (默认: 10)
+   - 考虑对高频操作进行速率限制
+
+3. **内存管理**:
+   - 使用缓冲池提高内存使用效率
+
+### 最佳实践
+
+1. **资源管理**:
+   - 始终使用 `defer client.Close()` 释放资源
+   - 在完成操作后及时关闭客户端
+
+2. **错误处理**:
+   - 检查所有 API 调用的错误返回值
+   - 实现适当的重试和超时逻辑
+
+3. **日志记录**:
+   - 记录关键操作和错误
+   - 监控性能指标如 RTT 和成功率
 
 ## 测试
 

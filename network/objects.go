@@ -3,11 +3,11 @@ package network
 import (
 	"fmt"
 
+	"log"
+
 	"github.com/anviod/bacnet"
 	"github.com/anviod/bacnet/btypes"
 	"github.com/anviod/bacnet/helpers/data"
-	log "github.com/anviod/bacnet/helpers/log"
-	"go.uber.org/zap"
 )
 
 // DeviceObjects get device objects
@@ -27,11 +27,7 @@ func (device *Device) DeviceObjects(deviceID btypes.ObjectInstance, checkAPDU bo
 				device.Segmentation = uint32(dev.Segmentation)
 			}
 		}
-		log.Logger.Info("bacnet.DeviceObjects() do whois",
-			zap.Uint32("deviceID", uint32(deviceID)),
-			zap.Uint32("maxAPDU", device.MaxApdu),
-			zap.Uint32("segmentation", device.Segmentation),
-		)
+		log.Printf("bacnet.DeviceObjects() do whois on deviceID: %v maxADPU: %v Segmentation: %v", deviceID, device.MaxApdu, device.Segmentation)
 	}
 
 	device.GetDeviceDetails(deviceID) //TODO remove this as its just here for testing
@@ -74,11 +70,11 @@ func (device *Device) deviceObjectsBuilder(deviceID btypes.ObjectInstance) (obje
 	}
 	out, err := device.Read(obj)
 	if err != nil {
-		log.Logger.Error("failed to read object list in deviceObjectsBuilder()", zap.Error(err))
+		log.Printf("[ERROR] failed to read object list in deviceObjectsBuilder() err: %v", err)
 		return nil, err
 	}
 	_, o := data.ToUint32(out)
-	log.Logger.Info("size of object-list", zap.Any("size", o))
+	log.Printf("[INFO] size of object-list: %v", o)
 	var listLen = int(o)
 	for i := 1; i <= listLen; i++ {
 		obj.ArrayIndex = uint32(i)

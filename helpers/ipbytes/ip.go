@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"log"
 	"math/big"
 	"net"
-
-	log "github.com/anviod/bacnet/helpers/log"
-	"go.uber.org/zap"
 )
 
 func ip4toInt(ip4Address net.IP) int64 {
@@ -22,7 +20,7 @@ func pack32BinaryIP4(ip4Address string) []byte {
 	buf := new(bytes.Buffer)
 	err := binary.Write(buf, binary.BigEndian, uint32(ipv4Decimal))
 	if err != nil {
-		log.Logger.Error("helpers.mac.Pack32BinaryIP4() unable to write to buffer", zap.Error(err))
+		log.Printf("[ERROR] helpers.mac.Pack32BinaryIP4() unable to write to buffer: %v", err)
 	}
 	return buf.Bytes()
 }

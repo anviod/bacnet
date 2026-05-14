@@ -242,6 +242,122 @@ func readMultiplePoints(client bacnet.Client, device btypes.Device) {
 }
 ```
 
+### Scan All Objects in Device
+
+```go
+// Scan all objects in a device
+func scanDeviceObjects(client bacnet.Client, device btypes.Device) error {
+    // Get all objects from the device
+    scannedDevice, err := client.Objects(device)
+    if err != nil {
+        return fmt.Errorf("failed to scan objects: %v", err)
+    }
+
+    fmt.Printf("Found %d objects in device %d\n", scannedDevice.Objects.Len(), device.DeviceID)
+
+    // Iterate through all object types
+    objectTypes := []btypes.ObjectType{
+        btypes.AnalogInput,
+        btypes.AnalogOutput,
+        btypes.AnalogValue,
+        btypes.BinaryInput,
+        btypes.BinaryOutput,
+        btypes.BinaryValue,
+    }
+
+    for _, objType := range objectTypes {
+        objects := scannedDevice.Objects[objType]
+        if len(objects) == 0 {
+            continue
+        }
+
+        fmt.Printf("\n%s objects:\n", objType)
+        for instance, obj := range objects {
+            fmt.Printf("  Instance %d: Name=%q\n", instance, obj.Name)
+        }
+    }
+
+    return nil
+}
+```
+
+### Complete Device Integration Flow
+
+```go
+// Complete flow: Discover device -> Scan objects -> Read value -> Write value
+func completeIntegration(client bacnet.Client) error {
+    // Step 1: Discover devices
+    devices, err := client.WhoIs(&bacnet.WhoIsOpts{
+        Low:  2228316,
+        High: 2228316,
+    })
+    if err != nil {
+        return fmt.Errorf("whois failed: %v", err)
+    }
+    if len(devices) == 0 {
+        return fmt.Errorf("no devices found")
+    }
+
+    device := devices[0]
+    fmt.Printf("Found device: ID=%d, IP=%s:%d\n", device.DeviceID, device.Ip, device.Port)
+
+    // Step 2: Scan objects
+    scannedDevice, err := client.Objects(device)
+    if err != nil {
+        return fmt.Errorf("object scan failed: %v", err)
+    }
+
+    // Step 3: Find target point
+    aiObjects := scannedDevice.Objects[btypes.AnalogInput]
+    targetPoint, ok := aiObjects[0] // AnalogInput:0
+    if !ok {
+        return fmt.Errorf("target point AnalogInput:0 not found")
+    }
+    fmt.Printf("Found target point: %s\n", targetPoint.Name)
+
+    // Step 4: Read present value
+    result, err := client.ReadProperty(device, btypes.PropertyData{
+        Object: btypes.Object{
+            ID: btypes.ObjectID{
+                Type:     btypes.AnalogInput,
+                Instance: 0,
+            },
+            Properties: []btypes.Property{
+                {Type: btypes.PropPresentValue},
+            },
+        },
+    })
+    if err != nil {
+        return fmt.Errorf("read property failed: %v", err)
+    }
+    fmt.Printf("Present Value: %v\n", result.Object.Properties[0].Data)
+
+    // Step 5: Write to AnalogValue
+    writeErr := client.WriteProperty(device, btypes.PropertyData{
+        Object: btypes.Object{
+            ID: btypes.ObjectID{
+                Type:     btypes.AnalogValue,
+                Instance: 1,
+            },
+            Properties: []btypes.Property{
+                {
+                    Type:       btypes.PropPresentValue,
+                    ArrayIndex: btypes.ArrayAll,
+                    Data:       float64(25.5),
+                    Priority:   btypes.Normal,
+                },
+            },
+        },
+    })
+    if writeErr != nil {
+        return fmt.Errorf("write property failed: %v", writeErr)
+    }
+    fmt.Println("Write successful")
+
+    return nil
+}
+```
+
 ## API Reference
 
 ### Client Interface
@@ -701,6 +817,75 @@ const (
 )
 ```
 
+## Usage Notes
+
+### Network Considerations
+
+1. **Port Binding**: 
+   - Default BACnet port is 47808 (0xBAC0)
+   - When testing with a simulator on the same machine, use different ports for discovery and confirmed services to avoid port conflicts
+   - Example: Use port 47808 for WhoIs discovery, then switch to 47809 for ReadProperty/WriteProperty operations
+
+2. **IP Address Binding**:
+   - Bind to `0.0.0.0` to listen on all interfaces
+   - Avoid binding to the target device's IP address
+   - For multi-subnet environments, ensure proper subnet CIDR configuration
+
+3. **Broadcast Behavior**:
+   - WhoIs uses broadcast by default
+   - Use `WhoIsOpts.Destination` for unicast WhoIs requests
+   - Broadcast may not work across VLANs or subnets
+
+### Error Handling
+
+1. **Timeout Handling**:
+   - Use `ReadPropertyWithTimeout` for explicit timeout control
+   - Confirmed services include retry logic with exponential backoff
+   - Unconfirmed services have no retry mechanism
+
+2. **Common Errors**:
+   - `timeout`: Device did not respond within the timeout period
+   - `invalid argument`: Invalid object type or property ID
+   - `no such object`: Requested object does not exist on the device
+   - `access denied`: Insufficient permissions for write operations
+
+3. **Retry Strategy**:
+   - Confirmed services are retried up to 2 times by default
+   - Consider implementing application-level retry for critical operations
+
+### Performance Considerations
+
+1. **Batch Operations**:
+   - Use `ReadMultiProperty` for reading multiple properties at once
+   - This reduces network round-trips and improves performance
+   - Limit batch size based on device's MaxAPDU setting
+
+2. **Concurrency**:
+   - Client is thread-safe for concurrent operations
+   - TSM limits concurrent confirmed transactions (default: 10)
+   - Consider rate limiting for high-frequency operations
+
+3. **Memory Management**:
+   - Use buffer pool for efficient memory usage
+   - Release resources promptly with `client.Close()`
+
+### Best Practices
+
+1. **Client Lifecycle**:
+   - Always use `defer client.Close()` to release resources
+   - Start `client.ClientRun()` in a goroutine before making requests
+   - Verify `client.IsRunning()` before sending requests
+
+2. **Device Communication**:
+   - Cache device addresses after discovery
+   - Validate device responses for expected data types
+   - Handle device reboots and network interruptions gracefully
+
+3. **Testing**:
+   - Use the provided integration test (`TestRealDeviceAcceptanceFlow`) for validation
+   - Test with both real devices and simulators
+   - Monitor response times and error rates in production
+
 ## Testing
 
 ```bash
@@ -712,6 +897,9 @@ go test -v ./network/...
 
 # Run acceptance tests
 go test -v -run Acceptance
+
+# Run real device integration test
+go test . -run TestRealDeviceAcceptanceFlow -count=1 -v
 ```
 
 ## License

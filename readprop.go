@@ -3,6 +3,7 @@ package bacnet
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/anviod/bacnet/btypes"
@@ -24,15 +25,21 @@ func (c *client) ReadPropertyWithTimeout(device btypes.Device, rp btypes.Propert
 	defer c.tsm.Put(id)
 	enc := encoding.NewEncoder()
 	device.Addr.SetLength()
+	srcAddr := c.dataLink.GetMyAddress()
 	npdu := &btypes.NPDU{
 		Version:               btypes.ProtocolVersion,
 		Destination:           &device.Addr,
-		Source:                c.dataLink.GetMyAddress(),
+		Source:                srcAddr,
 		IsNetworkLayerMessage: false,
 		ExpectingReply:        true,
 		Priority:              btypes.Normal,
 		HopCount:              btypes.DefaultHopCount,
 	}
+	log.Printf("[DEBUG] ReadProperty id=%d device=%s:%d dest.Mac=%v dest.MacLen=%d dest.Net=%d dest.Len=%d src.Mac=%v src.Net=%d rp.Object.ID=%v rp.Properties=%v",
+		id, device.Ip, device.Port,
+		device.Addr.Mac, device.Addr.MacLen, device.Addr.Net, device.Addr.Len,
+		srcAddr.Mac, srcAddr.Net,
+		rp.Object.ID, rp.Object.Properties)
 	enc.NPDU(npdu)
 
 	err = enc.ReadProperty(uint8(id), rp)
@@ -45,16 +52,21 @@ func (c *client) ReadPropertyWithTimeout(device btypes.Device, rp btypes.Propert
 	for count := 0; err != nil && count < retryCount; count++ {
 		var b []byte
 		var out btypes.PropertyData
+		log.Printf("[DEBUG] ReadProperty sending packet (id=%d, count=%d), enc.Bytes() len=%d", id, count, len(enc.Bytes()))
 		_, err = c.Send(device.Addr, npdu, enc.Bytes(), nil)
 		if err != nil {
+			log.Printf("[DEBUG] ReadProperty send error: %v", err)
 			continue
 		}
+		log.Printf("[DEBUG] ReadProperty sent, waiting for response (id=%d, timeout=%v)...", id, timeout)
 
-		var raw any
+		var raw interface{}
 		raw, err = c.tsm.Receive(id, timeout)
 		if err != nil {
+			log.Printf("[DEBUG] ReadProperty receive error: %v (id=%d)", err, id)
 			continue
 		}
+		log.Printf("[DEBUG] ReadProperty received response (id=%d, type=%T)", id, raw)
 		switch v := raw.(type) {
 		case error:
 			return out, v

@@ -2,6 +2,7 @@
 
 - [英文文档](README.md)
 - [中文文档](README_CN.md) (本文档)
+- [房间模拟器 Room Simulator（YABE 扫描）](ROOM_SIMULATOR.md)
 
 # BACnet 协议栈
 
@@ -15,12 +16,15 @@
 - **网络管理**：What-Is-Network-Number、Who-Is-Router-To-Network
 - **事务管理**：TSM（事务状态机）用于确认服务
 - **并发安全**：线程安全设计，支持连接池
+- **房间模拟器**：`cmd/room-simulator`，便于 YABE 扫描的虚拟房间设备（见 [ROOM_SIMULATOR.md](ROOM_SIMULATOR.md)）
 
 ## 安装
 
 ```bash
 go get github.com/anviod/bacnet
 ```
+
+边缘 / 交叉编译（静态、禁用 cgo）：`./scripts/cross-build.sh` 或 `make cross`，例如 `CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./...`（ARMv7+）。
 
 ## 快速开始
 

@@ -67,6 +67,11 @@ func (d *Decoder) double(x *float64) {
 }
 
 func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
+	// Empty BACnet LIST / optional absent value: encode no application data
+	// (opening/closing tags around the property value stay intact).
+	if i == nil {
+		return nil
+	}
 	//if null used for sending null on point write to prop 87
 	switch i.(type) {
 	case null.Null:
@@ -117,7 +122,7 @@ func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
 		e.tag(tagInfo{ID: tagReal, Context: appLayerContext, Value: realLen})
 		e.real(val)
 	case float64:
-		e.tag(tagInfo{ID: tagDouble, Context: appLayerContext, Value: realLen})
+		e.tag(tagInfo{ID: tagDouble, Context: appLayerContext, Value: doubleLen})
 		e.double(val)
 	case bool:
 		e.boolean(val)
@@ -143,6 +148,29 @@ func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
 	case btypes.ObjectID:
 		e.tag(tagInfo{ID: tagObjectID, Context: appLayerContext, Value: objectIDLen})
 		e.objectId(val.Type, val.Instance)
+	case []btypes.ObjectID:
+		for _, id := range val {
+			if err := e.AppData(id, false); err != nil {
+				return err
+			}
+		}
+	case *btypes.BitString:
+		if val == nil {
+			e.tag(tagInfo{ID: tagNull, Context: appLayerContext})
+			return nil
+		}
+		bytesUsed := val.BytesUsed()
+		unusedBits := uint8(0)
+		if bytesUsed > 0 {
+			unusedBits = bytesUsed*8 - val.GetBitUsed()
+		}
+		e.tag(tagInfo{ID: tagBitString, Context: appLayerContext, Value: uint32(bytesUsed) + 1})
+		e.write(unusedBits & 0x07)
+		for i := uint8(0); i < bytesUsed; i++ {
+			e.write(byteReverseBits(val.Byte(i)))
+		}
+	case btypes.BitString:
+		return e.AppData(&val, false)
 	case null.Null:
 		e.tag(tagInfo{ID: tagNull, Context: appLayerContext})
 	default:

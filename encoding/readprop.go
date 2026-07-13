@@ -68,9 +68,11 @@ func (e *Encoder) ReadPropertyAck(invokeID uint8, data btypes.PropertyData) erro
 		return err
 	}
 
-	e.openingTag(tagID)
-	tagID++
+	// Tag 3: property value — opening and closing MUST use the same tag number
+	// (ASHRAE 135 Clause 20.2.1). Incrementing between them produced 0x3E…0x4F,
+	// which YABE rejects as "Didn't get response from 'Object List'".
 	prop := data.Object.Properties[0]
+	e.openingTag(tagID)
 	e.AppData(prop.Data, false)
 	e.closingTag(tagID)
 	return e.Error()
@@ -139,7 +141,6 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 		}
 
 		if openTag == 3 {
-			var err error
 			// We subtract one to ignore the closing tag.
 			datalist := make([]interface{}, 0)
 
@@ -158,10 +159,6 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 			// If we only have one value in the list, lets just return that value
 			if len(datalist) == 1 {
 				prop.Data = datalist[0]
-			}
-			if err != nil {
-				d.err = err
-				return err
 			}
 		}
 	} else {

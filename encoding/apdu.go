@@ -18,22 +18,36 @@ func (e *Encoder) APDU(a btypes.APDU) error {
 	switch a.DataType {
 	case btypes.ComplexAck:
 		e.apduComplexAck(a)
+	case btypes.SimpleAck:
+		e.apduSimpleAck(a)
 	case btypes.UnconfirmedServiceRequest:
 		e.apduUnconfirmed(a)
 	case btypes.ConfirmedServiceRequest:
 		e.apduConfirmed(a)
+	case btypes.Error:
+		e.apduError(a)
 	case btypes.SegmentAck:
 		return fmt.Errorf("decoded Segmented")
-	case btypes.Error:
-		return fmt.Errorf("decoded Error")
 	case btypes.Reject:
 		return fmt.Errorf("decoded Rejected")
 	case btypes.Abort:
-		return fmt.Errorf("decoded Aborted")
+		e.apduAbort(a)
 	default:
 		return fmt.Errorf("unknown PDU type: %d", meta.DataType())
 	}
 	return nil
+}
+
+func (e *Encoder) apduAbort(a btypes.APDU) {
+	// PDU type byte already written by APDU(); write invoke ID + reason from RawData[0].
+	e.write(a.InvokeId)
+	var reason uint8
+	if len(a.RawData) > 0 {
+		reason = a.RawData[0]
+	} else {
+		reason = uint8(AbortReasonOther)
+	}
+	e.write(reason)
 }
 
 func (e *Encoder) apduConfirmed(a btypes.APDU) {
@@ -53,6 +67,18 @@ func (e *Encoder) apduUnconfirmed(a btypes.APDU) {
 func (e *Encoder) apduComplexAck(a btypes.APDU) {
 	e.write(a.InvokeId)
 	e.write(a.Service)
+}
+
+func (e *Encoder) apduSimpleAck(a btypes.APDU) {
+	e.write(a.InvokeId)
+	e.write(a.Service)
+}
+
+func (e *Encoder) apduError(a btypes.APDU) {
+	e.write(a.InvokeId)
+	e.write(a.Service)
+	_ = e.AppData(btypes.Enumerated(a.Error.Class), false)
+	_ = e.AppData(btypes.Enumerated(a.Error.Code), false)
 }
 
 func (d *Decoder) APDU(a *btypes.APDU) error {
@@ -79,10 +105,18 @@ func (d *Decoder) APDU(a *btypes.APDU) error {
 	case btypes.Reject:
 		return fmt.Errorf("Rejected")
 	case btypes.Abort:
-		return fmt.Errorf("Aborted")
+		return d.apduAbort(a)
 	default:
 		return fmt.Errorf("Unknown PDU type:%d", a.DataType)
 	}
+}
+
+func (d *Decoder) apduAbort(a *btypes.APDU) error {
+	d.decode(&a.InvokeId)
+	var reason uint8
+	d.decode(&reason)
+	a.RawData = []byte{reason}
+	return d.Error()
 }
 
 //func (d *Decoder) apduError(a *btypes.APDU) error {
@@ -112,27 +146,30 @@ func (d *Decoder) apduError(a *btypes.APDU) error {
 	d.decode(&a.InvokeId)
 	d.decode(&a.Service)
 
-	_, meta := d.tagNumber()
-	if meta.isOpening() {
-		_, _, value := d.tagNumberAndValue()
-		a.Error.Class = bacerr.ErrorClass(d.unsigned(int(value)))
-		_, _, value = d.tagNumberAndValue()
-		a.Error.Code = bacerr.ErrorCode(d.unsigned(int(value)))
-		_, meta = d.tagNumber()
-		if !meta.isClosing() {
-			return &ErrorWrongTagType{ClosingTag}
-		}
-	} else {
-		_, m, _ := d.tagNumberAndValue()
-		a.Error.Class = bacerr.ErrorClass(m)
-		_, m, _ = d.tagNumberAndValue()
-		a.Error.Code = bacerr.ErrorCode(m)
-		//TODO was like this but didnt work need to test more (changed to but as above)
-		//t, m, value := d.tagNumberAndValue()
-		//a.Error.Class = d.unsigned(int(value))
-		//t, m, value := d.tagNumberAndValue()
-		//a.Error.Code = d.unsigned(int(value))
+	classVal, err := d.AppData()
+	if err != nil {
+		return err
+	}
+	codeVal, err := d.AppData()
+	if err != nil {
+		return err
+	}
 
+	switch v := classVal.(type) {
+	case uint32:
+		a.Error.Class = bacerr.ErrorClass(v)
+	case btypes.Enumerated:
+		a.Error.Class = bacerr.ErrorClass(v)
+	default:
+		return fmt.Errorf("unexpected error class type %T", classVal)
+	}
+	switch v := codeVal.(type) {
+	case uint32:
+		a.Error.Code = bacerr.ErrorCode(v)
+	case btypes.Enumerated:
+		a.Error.Code = bacerr.ErrorCode(v)
+	default:
+		return fmt.Errorf("unexpected error code type %T", codeVal)
 	}
 	return nil
 }
@@ -140,6 +177,11 @@ func (d *Decoder) apduError(a *btypes.APDU) error {
 func (d *Decoder) apduComplexAck(a *btypes.APDU) error {
 	d.decode(&a.InvokeId)
 	d.decode(&a.Service)
+	// Snapshot remaining service data without consuming it, so callers that
+	// continue decoding from this Decoder (e.g. client ReadProperty) still work.
+	if d.len() > 0 {
+		a.RawData = append([]byte(nil), d.Bytes()...)
+	}
 	return d.Error()
 }
 

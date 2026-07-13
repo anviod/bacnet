@@ -55,10 +55,8 @@ func (e *Encoder) propertiesWithData(properties []btypes.Property) error {
 		tag++
 		openedTag := tag
 		e.openingTag(openedTag)
-		e.write(prop.Data)
+		_ = e.AppData(prop.Data, false)
 		e.closingTag(openedTag)
-
-		e.write(prop.Data)
 	}
 	return e.Error()
 }

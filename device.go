@@ -95,6 +95,15 @@ type Client interface {
 	// WriteMultiProperty 在单个请求中向多个对象写入多个属性。
 	// 这比多次调用 WriteProperty 更高效。
 	WriteMultiProperty(dev btypes.Device, wp btypes.MultiplePropertyData) error
+	// SubscribeCOV registers for change-of-value notifications on an object.
+	// SubscribeCOV 订阅对象的 COV 通知。
+	SubscribeCOV(device btypes.Device, data btypes.SubscribeCOVData) error
+	// CancelSubscribeCOV cancels a COV subscription.
+	// CancelSubscribeCOV 取消 COV 订阅。
+	CancelSubscribeCOV(device btypes.Device, processID uint32, objectID btypes.ObjectID) error
+	// WaitCOVNotification waits for a COV notification. processIDFilter >= 0 filters by process ID; -1 accepts any.
+	// WaitCOVNotification 等待 COV 通知。
+	WaitCOVNotification(processIDFilter int64, timeout time.Duration) (btypes.COVNotification, error)
 }
 
 type client struct {
@@ -103,6 +112,7 @@ type client struct {
 	utsm           *utsm.Manager
 	readBufferPool sync.Pool
 	running        bool
+	covCh          chan btypes.COVNotification
 }
 
 // ClientBuilder is used to configure and create a new BACnet client.
@@ -194,6 +204,7 @@ func NewClient(cb *ClientBuilder) (Client, error) {
 		readBufferPool: sync.Pool{New: func() any {
 			return make([]byte, maxPDU)
 		}},
+		covCh: make(chan btypes.COVNotification, 16),
 	}
 	return cli, err
 }
@@ -276,6 +287,15 @@ func (c *client) handleMsg(src *btypes.Address, b []byte) {
 				dec := encoding.NewDecoder(apdu.RawData)
 				var low, high int32
 				dec.WhoIs(&low, &high)
+			} else if apdu.UnconfirmedService == btypes.ServiceUnconfirmedCOVNotification {
+				dec := encoding.NewDecoder(apdu.RawData)
+				var n btypes.COVNotification
+				if err := dec.COVNotification(&n); err != nil {
+					log.Logger.Debug("unable to decode UnconfirmedCOVNotification", zap.Error(err))
+					return
+				}
+				n.Confirmed = false
+				c.publishCOV(n)
 			}
 		case btypes.SimpleAck:
 			log.Logger.Debug("received Simple Ack")
@@ -289,6 +309,10 @@ func (c *client) handleMsg(src *btypes.Address, b []byte) {
 				return
 			}
 		case btypes.ConfirmedServiceRequest:
+			if apdu.Service == btypes.ServiceConfirmedCOVNotification {
+				c.handleConfirmedCOVNotification(src, &apdu, &npdu)
+				return
+			}
 			log.Logger.Debug("received Confirmed Service Request")
 			err := c.tsm.Send(int(apdu.InvokeId), send)
 			if err != nil {
@@ -300,6 +324,10 @@ func (c *client) handleMsg(src *btypes.Address, b []byte) {
 			if err != nil {
 				log.Logger.Debug("unable to send error", zap.Uint8("invokeId", apdu.InvokeId), zap.Error(err))
 			}
+		case btypes.Abort:
+			reason, _ := encoding.AbortReasonFromAPDU(&apdu)
+			err := fmt.Errorf("abort reason %d", reason)
+			_ = c.tsm.Send(int(apdu.InvokeId), err)
 		default:
 			log.Logger.Debug("ignored packet", zap.ByteString("raw", b))
 		}

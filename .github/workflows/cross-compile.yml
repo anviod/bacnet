@@ -1,0 +1,62 @@
+name: Cross Compile
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  cross:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux/armv7
+            goos: linux
+            goarch: arm
+            goarm: "7"
+          - label: linux/arm64
+            goos: linux
+            goarch: arm64
+            goarm: ""
+          - label: linux/amd64
+            goos: linux
+            goarch: amd64
+            goarm: ""
+          - label: windows/amd64
+            goos: windows
+            goarch: amd64
+            goarm: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build packages
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go build ./...
+      - name: Build commands
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          go build -o /tmp/room-simulator ./cmd/room-simulator
+          go build -o /tmp/objlist-probe ./cmd/objlist-probe
+      - name: Compile tests
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: |
+          go test -c -o /tmp/encoding.test ./encoding
+          go test -c -o /tmp/server.test ./server
+          go test -c -o /tmp/roomsim.test ./cmd/room-simulator

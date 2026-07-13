@@ -6,7 +6,6 @@ import (
 	//"log"
 	"net"
 	"strings"
-	"syscall"
 
 	"github.com/anviod/bacnet/btypes"
 )
@@ -137,22 +136,17 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 
 	udpAddrStr := fmt.Sprintf("%s:%d", ip.String(), port)
 
+	// Reusable bind: set SO_REUSEADDR so room-simulator can coexist with YABE on
+	// the same Windows host. When bound to a specific IP, unicast ReadProperty
+	// requests addressed to that IP are delivered to room-simulator; broadcast
+	// Who-Is messages are received by both YABE and room-simulator.
 	lc := net.ListenConfig{
-		Control: func(network, address string, c syscall.RawConn) error {
-			var opErr error
-			err := c.Control(func(fd uintptr) {
-				opErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-			})
-			if err != nil {
-				return err
-			}
-			return opErr
-		},
+		Control: setReuseUDP,
 	}
 
 	conn, err := lc.ListenPacket(context.Background(), "udp4", udpAddrStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("bind %s failed (is YABE or another BACnet app using this port?): %w", udpAddrStr, err)
 	}
 
 	udpConn := conn.(*net.UDPConn)
@@ -163,7 +157,9 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 		listener:         udpConn,
 		port:             port,
 		myAddress:        IPPortToAddress(actualIP, port),
-		broadcastAddress: IPPortToAddress(broadcast, DefaultPort),
+		// Broadcast destination must use the same UDP port we listen on so
+		// Who-Is replies / clients on non-default ports still match.
+		broadcastAddress: IPPortToAddress(broadcast, port),
 	}, nil
 }
 

@@ -2,6 +2,7 @@
 
 - [English Documentation](README.md) (This file)
 - [中文文档](README_CN.md)
+- [房间模拟器 / Room Simulator（YABE）](ROOM_SIMULATOR.md)
   
 # BACnet Protocol Stack
 
@@ -15,12 +16,16 @@ A Go implementation of the BACnet/IP protocol stack for building automation and 
 - **Network Management**: What-Is-Network-Number, Who-Is-Router-To-Network
 - **Transaction Management**: TSM (Transaction State Machine) for confirmed services
 - **Concurrency**: Thread-safe design with connection pooling
+- **BACnet Server**: Full server-side implementation with object store, automatic WhoIs→IAm responses, and confirmed service handling
+- **Room Simulator**: `cmd/room-simulator` — YABE-friendly virtual room device (see [ROOM_SIMULATOR.md](ROOM_SIMULATOR.md))
 
 ## Installation
 
 ```bash
 go get github.com/anviod/bacnet
 ```
+
+Edge / cross-compile (static, no cgo): `./scripts/cross-build.sh` or `make cross`, e.g. `CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build ./...` (ARMv7+).
 
 ## Quick Start
 
@@ -557,11 +562,332 @@ const (
 
 ---
 
+## BACnet Server (服务端)
+
+The `server` package provides a complete BACnet/IP server implementation. It can act as a virtual BACnet device, responding to client requests with real data.
+
+### 中文说明
+
+`server` 包提供了完整的 BACnet/IP 服务端实现。它可以作为虚拟 BACnet 设备运行，响应客户端请求并返回真实数据。
+
+### Quick Start - Server
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    "os/signal"
+
+    "github.com/anviod/bacnet/server"
+    "github.com/anviod/bacnet/btypes"
+)
+
+func main() {
+    // Create server configuration
+    cfg := &server.DeviceConfig{
+        DeviceID:   1000,                     // BACnet device instance ID
+        DeviceName: "My BACnet Server",       // BACnet device name
+        VendorID:   999,                      // Vendor identifier
+        Ip:         "0.0.0.0",               // Bind to all interfaces
+        Port:       47808,                    // BACnet port
+        SubnetCIDR: 24,                      // Subnet mask
+    }
+
+    // Create the server
+    srv, err := server.NewServer(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer srv.Close()
+
+    // Add a temperature sensor object
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.AnalogInput,
+            Instance: 1,
+        },
+        Properties: []btypes.Property{
+            {
+                Type:       btypes.PROP_PRESENT_VALUE,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       float64(23.5),    // Current temperature: 23.5°C
+            },
+            {
+                Type:       btypes.PROP_OBJECT_NAME,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       "Room Temperature",
+            },
+            {
+                Type:       btypes.PROP_Propertybtypes,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       uint32(62),       // Degrees Celsius
+            },
+            {
+                Type:       btypes.PROP_DESCRIPTION,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       "Office room temperature sensor",
+            },
+        },
+    })
+
+    // Add a binary output object (relay control)
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.BinaryOutput,
+            Instance: 1,
+        },
+        Properties: []btypes.Property{
+            {
+                Type:       btypes.PROP_PRESENT_VALUE,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       uint32(0),        // Off
+            },
+            {
+                Type:       btypes.PROP_OBJECT_NAME,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       "Fan Control",
+            },
+        },
+    })
+
+    // Handle graceful shutdown
+    c := make(chan os.Signal, 1)
+    signal.Notify(c, os.Interrupt)
+
+    // Start the server in a goroutine
+    go func() {
+        log.Println("BACnet server starting...")
+        if err := srv.Serve(); err != nil {
+            log.Printf("Server error: %v", err)
+        }
+    }()
+
+    log.Printf("BACnet server started. Device ID: %d, Name: %s", srv.GetDeviceID(), cfg.DeviceName)
+    log.Println("Press Ctrl+C to stop")
+
+    // Update values dynamically (simulate sensor readings)
+    // go func() {
+    //     for {
+    //         time.Sleep(5 * time.Second)
+    //         srv.SetProperty(
+    //             btypes.AnalogInput, 1,
+    //             btypes.PROP_PRESENT_VALUE,
+    //             float64(20.0 + rand.Float64()*10.0),
+    //         )
+    //     }
+    // }()
+
+    <-c
+    log.Println("Shutting down server...")
+}
+```
+
+### Server Features
+
+#### 1. Object Management
+
+The server maintains a thread-safe object store for BACnet objects:
+
+```go
+// Add an object
+srv.AddObject(btypes.Object{
+    ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+})
+
+// Get an object
+obj, found := srv.GetObject(btypes.AnalogInput, 1)
+
+// Remove an object
+srv.RemoveObject(btypes.AnalogInput, 1)
+
+// Set a property value
+srv.SetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE, float64(25.0))
+
+// Get a property value
+value, found := srv.GetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE)
+```
+
+#### 2. Automatic WhoIs → IAm Response
+
+When a BACnet client sends a WhoIs broadcast, the server automatically responds with an IAm message if its device ID falls within the requested range:
+
+```go
+// Client sends: WhoIs(0, 4194304) → all devices
+// Server responds: IAm(DeviceID=1000, ...)
+
+// Client sends: WhoIs(2000, 3000) → devices in range
+// Server (DeviceID=1000) does NOT respond (out of range)
+```
+
+#### 3. Supported Confirmed Services
+
+| Service | Description | Status |
+|---------|-------------|--------|
+| ReadProperty | 读取单个属性值 | Supported |
+| WriteProperty | 写入单个属性值 | Supported |
+| ReadPropertyMultiple | 批量读取多个属性 | Supported |
+| WritePropertyMultiple | 批量写入多个属性 | Supported |
+
+#### 4. BACnet Error Responses
+
+The server returns proper BACnet error responses for invalid requests:
+
+| Error Condition | Error Class | Error Code |
+|----------------|-------------|------------|
+| Unknown object | ObjectError | UnknownObject |
+| Unknown property | PropertyError | UnknownProperty |
+| Write access denied | PropertyError | WriteAccessDenied |
+| Invalid request tag | ServicesError | InvalidTag |
+| Missing parameter | ServicesError | MissingRequiredParameter |
+| Unsupported service | ServicesError | ServiceRequestDenied |
+
+#### 5. Device Object Properties
+
+The server automatically maintains the standard BACnet Device object properties:
+
+| Property | Value |
+|----------|-------|
+| ObjectIdentifier | Configured device ID |
+| ObjectName | Configured device name |
+| VendorIdentifier | Configured vendor ID |
+| VendorName | "BACnet-Go" |
+| ModelName | "BACnet-Go Server" |
+| FirmwareRevision | "1.0.0" |
+| ProtocolVersion | 1 |
+| ProtocolRevision | 24 |
+| ProtocolServicesSupported | BitString (ReadProperty, WriteProperty, etc.) |
+| ProtocolObjectTypesSupported | BitString (AI, AO, AV, BI, BO, BV, etc.) |
+| MaxAPDUAccepted | 1476 |
+| DatabaseRevision | Auto-incremented on changes |
+
+#### 6. Default Object Properties
+
+When adding an object without specifying properties, the server creates default properties:
+
+```go
+// Adding an object with no properties gets defaults
+srv.AddObject(btypes.Object{
+    ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+})
+// Automatically creates: ObjectIdentifier, ObjectName, ObjectType,
+// PresentValue, StatusFlags, EventState, Reliability, OutOfService, Units
+```
+
+### Client ↔ Server Interaction Example
+
+```go
+// —— Server Side ——
+srv, _ := server.NewServer(&server.DeviceConfig{
+    DeviceID: 1000, DeviceName: "TestServer", VendorID: 999,
+    Ip: "0.0.0.0", Port: 47808, SubnetCIDR: 24,
+})
+go srv.Serve()
+defer srv.Close()
+
+srv.AddObject(btypes.Object{
+    ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+    Properties: []btypes.Property{
+        {Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: float64(42.5)},
+    },
+})
+
+// —— Client Side ——
+client, _ := bacnet.NewClient(&bacnet.ClientBuilder{
+    Ip: "192.168.1.100", SubnetCIDR: 24, Port: 47808,
+})
+go client.ClientRun()
+defer client.Close()
+
+// Discover the server
+devices, _ := client.WhoIs(&bacnet.WhoIsOpts{Low: 0, High: 4194304})
+
+// Read property from the server
+result, _ := client.ReadProperty(devices[0], btypes.PropertyData{
+    Object: btypes.Object{
+        ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+        Properties: []btypes.Property{
+            {Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+        },
+    },
+})
+// result.Object.Properties[0].Data == float64(42.5)
+
+// Write property to the server
+client.WriteProperty(devices[0], btypes.PropertyData{
+    Object: btypes.Object{
+        ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+        Properties: []btypes.Property{
+            {Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: float64(99.9)},
+        },
+    },
+})
+```
+
+### Server API Reference
+
+```go
+type Server interface {
+    // Lifecycle
+    Serve() error
+    Close() error
+    IsRunning() bool
+
+    // Object Management
+    AddObject(obj btypes.Object) error
+    RemoveObject(objType btypes.ObjectType, instance btypes.ObjectInstance) error
+    GetObject(objType btypes.ObjectType, instance btypes.ObjectInstance) (*btypes.Object, bool)
+    SetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType, data interface{}) error
+    GetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType) (interface{}, bool)
+    GetObjectStore() *ObjectStore
+    GetDeviceID() btypes.ObjectInstance
+}
+```
+
+### DeviceConfig
+
+```go
+type DeviceConfig struct {
+    DeviceID      btypes.ObjectInstance          // Device instance ID (0-4194304)
+    DeviceName    string                         // BACnet device name
+    VendorID      uint32                         // Vendor identifier
+    Interface     string                         // Network interface (e.g., "eth0")
+    Ip            string                         // IP address to bind
+    Port          int                            // BACnet port (default: 47808)
+    SubnetCIDR    int                            // Subnet CIDR (e.g., 24)
+    MaxPDU        uint16                         // Maximum PDU size
+    MaxSegments   uint                           // Maximum segments
+    Segmentation  segmentation.SegmentedType     // Segmentation support
+}
+```
+
+### Supported Object Types
+
+| Object Type | ID | Description |
+|-------------|-----|-------------|
+| AnalogInput | 0 | 模拟输入 (e.g., temperature sensors) |
+| AnalogOutput | 1 | 模拟输出 (e.g., valves, dampers) |
+| AnalogValue | 2 | 模拟值 |
+| BinaryInput | 3 | 二进制输入 (e.g., contact sensors) |
+| BinaryOutput | 4 | 二进制输出 (e.g., relays) |
+| BinaryValue | 5 | 二进制值 |
+| Device | 8 | BACnet 设备对象 |
+| MultiStateValue | 19 | 多状态值 |
+
+---
+
 ## Testing
 
 ```bash
 # Run all tests
 go test ./...
+
+# Run server tests
+go test ./server/...
+
+# Run server tests with coverage
+go test -cover ./server/...
 
 # Run specific test
 go test -v ./network/...

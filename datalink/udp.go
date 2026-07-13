@@ -157,8 +157,8 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 		listener:         udpConn,
 		port:             port,
 		myAddress:        IPPortToAddress(actualIP, port),
-		// Broadcast destination must use the same UDP port we listen on so
-		// Who-Is replies / clients on non-default ports still match.
+		// Broadcast IP is computed from the subnet; port and MacLen are
+		// finalized in GetBroadcastAddress() to use the standard BACnet port.
 		broadcastAddress: IPPortToAddress(broadcast, port),
 	}, nil
 }
@@ -185,9 +185,19 @@ func (c *udpDataLink) GetMyAddress() *btypes.Address {
 	return c.myAddress
 }
 
-// GetBroadcastAddress uses the given address with subnet to return the broadcast address
+// GetBroadcastAddress returns the subnet broadcast address with the standard
+// BACnet port (47808) and MacLen=0 to mark it as a broadcast address.
+// The listening port may differ from the broadcast port to avoid SO_REUSEADDR
+// conflicts when multiple BACnet entities share the same host.
 func (c *udpDataLink) GetBroadcastAddress() *btypes.Address {
-	return c.broadcastAddress
+	addr := *c.broadcastAddress
+	// Override port to standard BACnet port for broadcast
+	if len(addr.Mac) >= 6 {
+		addr.Mac[4] = 0xBA
+		addr.Mac[5] = 0xC0
+	}
+	addr.MacLen = 0 // mark as broadcast address
+	return &addr
 }
 
 func (c *udpDataLink) Send(data []byte, npdu *btypes.NPDU, dest *btypes.Address) (int, error) {

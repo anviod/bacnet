@@ -17,13 +17,10 @@ type Address struct {
 const GlobalBroadcast uint16 = 0xFFFF
 const broadcastNetwork uint16 = 0xFFFF
 
-// IsBroadcast returns if the address is a broadcast address
+// IsBroadcast returns if the address is a broadcast address.
+// MacLen==0 covers subnet-directed broadcasts where Net is not 0xFFFF.
 func (a *Address) IsBroadcast() bool {
-	//qygeng
-	// if a.Net == broadcastNetwork || a.MacLen == 0 {
-	// 	return true
-	// }
-	return a.Net == broadcastNetwork
+	return a.Net == broadcastNetwork || a.MacLen == 0
 }
 
 // SetLength if device is of type ms-tp then set address len to 1

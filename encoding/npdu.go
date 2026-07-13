@@ -24,11 +24,10 @@ func (e *Encoder) NPDU(n *btypes.NPDU) {
 		}
 	}
 
-	// Repeat for source
+	// Always encode source address when present, so that devices
+	// using ephemeral ports (Net==0) can still receive routed responses.
 	if n.Source != nil {
-		if n.Source.Net != 0 {
-			meta.SetSource(true)
-		}
+		meta.SetSource(true)
 	}
 	e.write(meta)
 	if meta.HasDestination() {

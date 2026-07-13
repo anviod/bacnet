@@ -95,9 +95,6 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 
 	var objectType btypes.ObjectType
 	var instance btypes.ObjectInstance
-	if !meta.isContextSpecific() {
-		return fmt.Errorf("Tag %d should be context specific. %x", tag, meta)
-	}
 	objectType, instance = d.objectId()
 	data.Object.ID.Type = objectType
 	data.Object.ID.Instance = instance

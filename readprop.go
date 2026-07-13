@@ -15,6 +15,86 @@ func (c *client) ReadProperty(device btypes.Device, rp btypes.PropertyData) (bty
 	return c.ReadPropertyWithTimeout(device, rp, 10*time.Second)
 }
 
+// ReadPropertyBroadcast 以广播方式读取 BACnet 属性
+// broadcastAddr: UDP 广播目标地址 (如 192.168.3.255:47808), 用于确保
+// 共享同一端口的所有设备都能收到请求
+// ReadPropertyBroadcast reads a property using a broadcast UDP destination,
+// useful when multiple BACnet devices share the same UDP port.
+func (c *client) ReadPropertyBroadcast(device btypes.Device, rp btypes.PropertyData, timeout time.Duration, broadcastAddr btypes.Address) (btypes.PropertyData, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	id, err := c.tsm.ID(ctx)
+	if err != nil {
+		return btypes.PropertyData{}, fmt.Errorf("unable to get an transaction id: %v", err)
+	}
+	defer c.tsm.Put(id)
+	enc := encoding.NewEncoder()
+	device.Addr.SetLength()
+	srcAddr := c.dataLink.GetMyAddress()
+	npdu := &btypes.NPDU{
+		Version:               btypes.ProtocolVersion,
+		Destination:           &device.Addr,
+		Source:                srcAddr,
+		IsNetworkLayerMessage: false,
+		ExpectingReply:        true,
+		Priority:              btypes.Normal,
+		HopCount:              btypes.DefaultHopCount,
+	}
+	enc.NPDU(npdu)
+
+	err = enc.ReadProperty(uint8(id), rp)
+	if enc.Error() != nil || err != nil {
+		return btypes.PropertyData{}, err
+	}
+
+	// 使用 broadcast 发送到广播地址, 确保共享端口的所有设备都能收到
+	broadcastType := &SetBroadcastType{
+		Set:     true,
+		BacFunc: btypes.BacFuncBroadcast,
+	}
+
+	err = fmt.Errorf("go")
+	for count := 0; err != nil && count < retryCount; count++ {
+		var b []byte
+		var out btypes.PropertyData
+		_, err = c.Send(broadcastAddr, npdu, enc.Bytes(), broadcastType)
+		if err != nil {
+			continue
+		}
+
+		var raw interface{}
+		raw, err = c.tsm.Receive(id, timeout)
+		if err != nil {
+			continue
+		}
+		log.Printf("[DEBUG] ReadPropertyBroadcast received response (id=%d, type=%T)", id, raw)
+		switch v := raw.(type) {
+		case error:
+			return out, v
+		case []byte:
+			b = v
+		default:
+			return out, fmt.Errorf("received unknown datatype %T", raw)
+		}
+
+		dec := encoding.NewDecoder(b)
+		var apdu btypes.APDU
+		if err = dec.APDU(&apdu); err != nil {
+			continue
+		}
+		if apdu.Error.Class != 0 || apdu.Error.Code != 0 {
+			err = fmt.Errorf("received error, class: %d, code: %d", apdu.Error.Class, apdu.Error.Code)
+			continue
+		}
+
+		if err = dec.ReadProperty(&out); err != nil {
+			continue
+		}
+		return out, dec.Error()
+	}
+	return btypes.PropertyData{}, err
+}
+
 func (c *client) ReadPropertyWithTimeout(device btypes.Device, rp btypes.PropertyData, timeout time.Duration) (btypes.PropertyData, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

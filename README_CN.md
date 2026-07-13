@@ -374,9 +374,303 @@ func safeReadProperty(client bacnet.Client, device btypes.Device, objID btypes.O
 
 ---
 
+---
+
+## 服务端模式 (Server / 从机)
+
+`server` 包提供了完整的 BACnet/IP 服务端实现。它可以作为虚拟 BACnet 设备运行，自动响应 WhoIs→IAm，处理 ReadProperty、WriteProperty、ReadPropertyMultiple、WritePropertyMultiple 和 SubscribeCOV 请求。
+
+### 快速开始 — 创建 BACnet 服务端
+
+```go
+package main
+
+import (
+    "log"
+    "os"
+    "os/signal"
+
+    "github.com/anviod/bacnet/btypes"
+    "github.com/anviod/bacnet/server"
+)
+
+func main() {
+    // 1. 创建服务端配置
+    cfg := &server.DeviceConfig{
+        DeviceID:   1234,                     // BACnet 设备实例号
+        DeviceName: "Room Simulator",         // 设备名称
+        VendorID:   999,                      // 厂商标识
+        Ip:         "192.168.3.115",          // 绑定 IP（空则 0.0.0.0）
+        Port:       47810,                    // BACnet 端口 (默认 47808)
+        SubnetCIDR: 24,                       // 子网掩码
+        MaxPDU:     btypes.MaxAPDU,           // 最大 PDU (默认 1476)
+    }
+
+    // 2. 创建服务端
+    srv, err := server.NewServer(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer srv.Close()
+
+    // 3. 添加对象（温度传感器）
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.AnalogInput,
+            Instance: 1,
+        },
+        Properties: []btypes.Property{
+            {
+                Type:       btypes.PROP_PRESENT_VALUE,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       float32(22.5),    // 当前温度 22.5°C
+            },
+            {
+                Type:       btypes.PROP_OBJECT_NAME,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       "Space Temperature",
+            },
+            {
+                Type:       btypes.PROP_UNITS,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       uint32(62),       // 摄氏度
+            },
+        },
+    })
+
+    // 4. 添加可写对象（温度设定值）
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.AnalogValue,
+            Instance: 1,
+        },
+        Properties: []btypes.Property{
+            {
+                Type:       btypes.PROP_PRESENT_VALUE,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       float32(25.0),
+            },
+            {
+                Type:       btypes.PROP_OBJECT_NAME,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       "Temperature Setpoint",
+            },
+        },
+    })
+
+    // 5. 启动服务端
+    go func() {
+        log.Println("服务端启动中...")
+        if err := srv.Serve(); err != nil {
+            log.Printf("服务端错误: %v", err)
+        }
+    }()
+
+    log.Printf("BACnet 服务端已启动。Device ID: %d, Name: %s", srv.GetDeviceID(), cfg.DeviceName)
+
+    // 6. 动态更新传感器值（可选）
+    // go func() {
+    //     ticker := time.NewTicker(5 * time.Second)
+    //     for range ticker.C {
+    //         srv.SetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE, float32(20.0 + rand.Float32()*5.0))
+    //     }
+    // }()
+
+    // 等待退出信号
+    sig := make(chan os.Signal, 1)
+    signal.Notify(sig, os.Interrupt)
+    <-sig
+    log.Println("正在停止服务端...")
+}
+```
+
+### 运行内置房间模拟器
+
+项目内置了一个完整的房间模拟器，可作为从机模式参考实现：
+
+```bash
+# 启动房间模拟器（Device ID 1234，端口 47810）
+go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24 -port 47810 -device-id 1234
+
+# 启用动态温度变化（便于观察 COV 通知）
+go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24 -port 47810 -device-id 1234 -dynamic
+```
+
+预置对象清单：
+| 对象类型 | Instance | 名称 | 可写 |
+|----------|:--------:|------|:----:|
+| AnalogInput | 1 | Space Temperature | — |
+| AnalogInput | 2 | Outdoor Temperature | — |
+| AnalogInput | 3 | Humidity | — |
+| AnalogInput | 4 | Supply Air Temperature | — |
+| AnalogValue | 1 | Temperature Setpoint | ✓ |
+| AnalogValue | 2 | Cooling Setpoint | ✓ |
+| AnalogValue | 3 | Heating Setpoint | ✓ |
+| BinaryInput | 1 | Occupancy | — |
+| BinaryInput | 2 | Window Status | — |
+| BinaryOutput | 1 | Fan | ✓ |
+| BinaryOutput | 2 | Light | ✓ |
+| BinaryValue | 1 | Occupancy Override | ✓ |
+| MultiStateValue | 1 | HVAC Mode (Off/Heat/Cool/Auto) | ✓ |
+| MultiStateValue | 2 | Fan Speed (Off/Low/Med/High) | ✓ |
+
+### 对象管理
+
+```go
+// 添加对象（自动填充默认属性）
+srv.AddObject(btypes.Object{
+    ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 2},
+})
+// 自动创建: ObjectIdentifier, ObjectName, ObjectType,
+//           PresentValue, StatusFlags, EventState, Reliability, OutOfService, Units
+
+// 获取对象
+obj, found := srv.GetObject(btypes.AnalogInput, 1)
+
+// 移除对象
+srv.RemoveObject(btypes.AnalogInput, 2)
+
+// 设置属性值（自动触发 COV 通知）
+srv.SetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE, float32(26.5))
+
+// 获取属性值
+value, found := srv.GetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE)
+```
+
+### 客户端 ↔ 服务端 完整交互示例
+
+```go
+// ═══════════ 服务端 ═══════════
+srv, _ := server.NewServer(&server.DeviceConfig{
+    DeviceID:   1000,
+    DeviceName: "TestServer",
+    VendorID:   999,
+    Ip:         "0.0.0.0",
+    Port:       47808,
+    SubnetCIDR: 24,
+})
+go srv.Serve()
+defer srv.Close()
+
+// 添加模拟输入对象
+srv.AddObject(btypes.Object{
+    ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+    Properties: []btypes.Property{
+        {Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: float32(42.5)},
+        {Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll, Data: "Temperature"},
+    },
+})
+
+// ═══════════ 客户端 ═══════════
+client, _ := bacnet.NewClient(&bacnet.ClientBuilder{
+    Ip:         "192.168.1.100",
+    SubnetCIDR: 24,
+    Port:       47808,
+})
+go client.ClientRun()
+defer client.Close()
+
+// 发现设备
+devices, _ := client.WhoIs(&bacnet.WhoIsOpts{Low: 0, High: 4194304})
+// → 返回 Device{DeviceID: 1000, ...}
+
+// 扫描对象
+scanned, _ := client.Objects(devices[0])
+// → scanned.Objects[AnalogInput][1].Name == "Temperature"
+
+// 读取属性
+result, _ := client.ReadProperty(devices[0], btypes.PropertyData{
+    Object: btypes.Object{
+        ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+        Properties: []btypes.Property{
+            {Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+        },
+    },
+})
+// → result.Object.Properties[0].Data == float32(42.5)
+
+// 写入属性
+client.WriteProperty(devices[0], btypes.PropertyData{
+    Object: btypes.Object{
+        ID: btypes.ObjectID{Type: btypes.AnalogValue, Instance: 1},
+        Properties: []btypes.Property{
+            {
+                Type:       btypes.PROP_PRESENT_VALUE,
+                ArrayIndex: btypes.ArrayAll,
+                Data:       float32(267.0),
+                Priority:   btypes.Normal,
+            },
+        },
+    },
+})
+// → 服务端收到 SimpleAck，Present_Value 更新为 267.0
+```
+
+### COV (Change of Value) 订阅
+
+```go
+// 客户端订阅 COV 通知
+err := client.SubscribeCOV(device, btypes.SubscribeCOVData{
+    ProcessID:      1,
+    ObjectID:       btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+    IssueConfirmed: false,      // false = UnconfirmedCOVNotification
+    Lifetime:       0,          // 0 = 永久订阅
+})
+
+// 等待 COV 通知
+notification, err := client.WaitCOVNotification(1, 30*time.Second)
+// notification.MonitoredObjectIdentifier → 被监控的对象
+// notification.ListOfValues[0].Value → 新值
+
+// 取消订阅
+err = client.CancelSubscribeCOV(device, 1, btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1})
+```
+
+### 服务端支持的确认服务
+
+| 服务 | 描述 | 说明 |
+|------|------|------|
+| ReadProperty | 读取单个属性 | 支持 ObjectList 数组索引 |
+| WriteProperty | 写入单个属性 | 自动触发 COV 通知 |
+| ReadPropertyMultiple | 批量读取 | 支持 PROP_ALL/REQUIRED/OPTIONAL 展开 |
+| WritePropertyMultiple | 批量写入 | 逐个处理，遇错继续 |
+| SubscribeCOV | COV 订阅 | 支持带生命周期的订阅管理 |
+
+### 服务端错误响应
+
+| 错误条件 | 错误类 | 错误码 |
+|----------|--------|--------|
+| 未知对象 | ObjectError | UnknownObject |
+| 未知属性 | PropertyError | UnknownProperty |
+| 写入被拒绝 | PropertyError | WriteAccessDenied |
+| 无效标签 | ServicesError | InvalidTag |
+| 缺少参数 | ServicesError | MissingRequiredParameter |
+| 不支持的服务 | ServicesError | ServiceRequestDenied |
+
+### 服务端 Device 对象自动属性
+
+服务端自动维护标准 BACnet Device 对象属性：
+
+| 属性 | 值 |
+|------|-----|
+| ObjectIdentifier | 配置的 DeviceID |
+| ObjectName | 配置的 DeviceName |
+| VendorIdentifier | 配置的 VendorID |
+| VendorName | "BACnet-Go" |
+| ModelName | "BACnet-Go Server" |
+| FirmwareRevision | "1.0.0" |
+| ProtocolVersion | 1 |
+| ProtocolRevision | 24 |
+| ProtocolServicesSupported | BitString (ReadProperty, WriteProperty 等) |
+| ProtocolObjectTypesSupported | BitString (AI, AO, AV, BI, BO, BV 等) |
+| MaxAPDUAccepted | 1476 |
+| DatabaseRevision | 每次修改自动递增 |
+
+---
+
 ## API 参考
 
-### 客户端接口
+### 客户端接口 (Client)
 
 ```go
 type Client interface {
@@ -402,6 +696,11 @@ type Client interface {
     // 带超时的变体
     ReadPropertyWithTimeout(dest btypes.Device, rp btypes.PropertyData, timeout time.Duration) (btypes.PropertyData, error)
     ReadMultiPropertyWithTimeout(dev btypes.Device, rp btypes.MultiplePropertyData, timeout time.Duration) (btypes.MultiplePropertyData, error)
+
+    // COV 订阅
+    SubscribeCOV(device btypes.Device, data btypes.SubscribeCOVData) error
+    CancelSubscribeCOV(device btypes.Device, processID uint32, objectID btypes.ObjectID) error
+    WaitCOVNotification(processIDFilter int64, timeout time.Duration) (btypes.COVNotification, error)
 }
 ```
 
@@ -414,6 +713,43 @@ type WhoIsOpts struct {
     GlobalBroadcast bool            // 使用全局广播 (0xFFFF)
     NetworkNumber   uint16          // 目标网络号
     Destination     *btypes.Address // 特定目标地址（可选）
+}
+```
+
+### 服务端接口 (Server)
+
+```go
+type Server interface {
+    // 生命周期
+    Serve() error
+    Close() error
+    IsRunning() bool
+
+    // 对象管理
+    AddObject(obj btypes.Object) error
+    RemoveObject(objType btypes.ObjectType, instance btypes.ObjectInstance) error
+    GetObject(objType btypes.ObjectType, instance btypes.ObjectInstance) (*btypes.Object, bool)
+    SetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType, data interface{}) error
+    GetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType) (interface{}, bool)
+    GetObjectStore() *ObjectStore
+    GetDeviceID() btypes.ObjectInstance
+}
+```
+
+### DeviceConfig 配置
+
+```go
+type DeviceConfig struct {
+    DeviceID      btypes.ObjectInstance          // 设备实例号 (0-4194304)
+    DeviceName    string                         // BACnet 设备名称
+    VendorID      uint32                         // 厂商标识
+    Interface     string                         // 网卡名（如 "eth0"）
+    Ip            string                         // 绑定 IP 地址
+    Port          int                            // BACnet 端口 (默认: 47808)
+    SubnetCIDR    int                            // 子网 CIDR (如 24 表示 /24)
+    MaxPDU        uint16                         // 最大 PDU 大小
+    MaxSegments   uint                           // 最大分段数
+    Segmentation  segmentation.SegmentedType     // 分段支持类型
 }
 ```
 

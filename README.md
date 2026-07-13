@@ -403,6 +403,11 @@ type Client interface {
     // Timeout variants
     ReadPropertyWithTimeout(dest btypes.Device, rp btypes.PropertyData, timeout time.Duration) (btypes.PropertyData, error)
     ReadMultiPropertyWithTimeout(dev btypes.Device, rp btypes.MultiplePropertyData, timeout time.Duration) (btypes.MultiplePropertyData, error)
+
+    // COV Subscription
+    SubscribeCOV(device btypes.Device, data btypes.SubscribeCOVData) error
+    CancelSubscribeCOV(device btypes.Device, processID uint32, objectID btypes.ObjectID) error
+    WaitCOVNotification(processIDFilter int64, timeout time.Duration) (btypes.COVNotification, error)
 }
 ```
 
@@ -730,7 +735,27 @@ When a BACnet client sends a WhoIs broadcast, the server automatically responds 
 | ReadPropertyMultiple | 批量读取多个属性 | Supported |
 | WritePropertyMultiple | 批量写入多个属性 | Supported |
 
-#### 4. BACnet Error Responses
+#### 4. COV (Change of Value) Subscription
+
+```go
+// Client subscribes to COV notifications
+err := client.SubscribeCOV(device, btypes.SubscribeCOVData{
+    ProcessID:      1,
+    ObjectID:       btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+    IssueConfirmed: false,      // false = UnconfirmedCOVNotification
+    Lifetime:       0,          // 0 = permanent subscription
+})
+
+// Wait for COV notification
+notification, err := client.WaitCOVNotification(1, 30*time.Second)
+// notification.MonitoredObjectIdentifier → monitored object
+// notification.ListOfValues[0].Value → new value
+
+// Cancel subscription
+err = client.CancelSubscribeCOV(device, 1, btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1})
+```
+
+#### 5. BACnet Error Responses
 
 The server returns proper BACnet error responses for invalid requests:
 
@@ -743,7 +768,7 @@ The server returns proper BACnet error responses for invalid requests:
 | Missing parameter | ServicesError | MissingRequiredParameter |
 | Unsupported service | ServicesError | ServiceRequestDenied |
 
-#### 5. Device Object Properties
+#### 6. Device Object Properties
 
 The server automatically maintains the standard BACnet Device object properties:
 
@@ -762,7 +787,7 @@ The server automatically maintains the standard BACnet Device object properties:
 | MaxAPDUAccepted | 1476 |
 | DatabaseRevision | Auto-incremented on changes |
 
-#### 6. Default Object Properties
+#### 7. Default Object Properties
 
 When adding an object without specifying properties, the server creates default properties:
 

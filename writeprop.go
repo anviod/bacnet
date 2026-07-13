@@ -10,6 +10,23 @@ import (
 )
 
 func (c *client) WriteProperty(device btypes.Device, wp btypes.PropertyData) error {
+	return c.writeProperty(device, wp, nil)
+}
+
+// WritePropertyBroadcast 以广播方式写入 BACnet 属性
+// broadcastAddr: UDP 广播目标地址 (如 192.168.3.255:47808), 用于确保
+// 共享同一端口的所有设备都能收到请求
+// WritePropertyBroadcast writes a property using a broadcast UDP destination,
+// useful when multiple BACnet devices share the same UDP port.
+func (c *client) WritePropertyBroadcast(device btypes.Device, wp btypes.PropertyData, broadcastAddr btypes.Address) error {
+	broadcastType := &SetBroadcastType{
+		Set:     true,
+		BacFunc: btypes.BacFuncBroadcast,
+	}
+	return c.writeProperty(device, wp, broadcastType, broadcastAddr)
+}
+
+func (c *client) writeProperty(device btypes.Device, wp btypes.PropertyData, broadcastType *SetBroadcastType, broadcastAddr ...btypes.Address) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	id, err := c.tsm.ID(ctx)
@@ -38,7 +55,11 @@ func (c *client) WriteProperty(device btypes.Device, wp btypes.PropertyData) err
 	for count := 0; err != nil && count < 2; count++ {
 		var b []byte
 		var raw interface{}
-		_, err = c.Send(device.Addr, npdu, enc.Bytes(), nil)
+		dest := device.Addr
+		if len(broadcastAddr) > 0 {
+			dest = broadcastAddr[0]
+		}
+		_, err = c.Send(dest, npdu, enc.Bytes(), broadcastType)
 		if err != nil {
 			continue
 		}

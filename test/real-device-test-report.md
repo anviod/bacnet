@@ -791,3 +791,465 @@ TestBACnetDriverWorkflow: PASS
   COV: 本机环回已测
   备注 / 抓包文件: 
 ```
+
+---
+
+## 十二、外部调用接口规范
+
+### 12.1 约束条件
+
+#### 12.1.1 网络约束
+
+| 约束项 | 要求 | 说明 |
+|--------|------|------|
+| 网络层 | 同一二层网段（推荐）或可达的 BACnet/IP 路由 | 广播发现需要二层可达 |
+| 端口 | UDP 47808（标准）或自定义端口 | 防火墙需允许 UDP 出入站 |
+| MTU | ≥ 1476 字节 | BACnet MaxAPDU 默认值 |
+| 超时 | 建议 3-10 秒 | 根据网络延迟调整 |
+| 重传 | 建议 2-3 次 | 处理网络抖动 |
+
+#### 12.1.2 设备约束
+
+| 约束项 | 要求 | 说明 |
+|--------|------|------|
+| DeviceID | 1-4194303 | BACnet 设备 ID 范围 |
+| Object 类型 | AnalogInput/Output/Value, BinaryInput/Output/Value, Device 等 | 标准 BACnet 对象类型 |
+| 属性支持 | PresentValue, ObjectName, Units 等 | 设备需支持至少这些属性 |
+| 写入权限 | 可写对象（AV/BV/BO）需配置写入权限 | 只读对象写入会被拒绝 |
+
+#### 12.1.3 客户端约束
+
+| 约束项 | 要求 | 说明 |
+|--------|------|------|
+| Go 版本 | 1.21+ | 编译要求 |
+| 绑定 IP | 非 0.0.0.0 时需与设备同一网段 | 否则广播无法到达 |
+| 端口冲突 | 避免与其他 BACnet 服务共用 47808 | 建议使用不同端口 |
+| 线程安全 | 所有 Client 方法线程安全 | 可并发调用 |
+| 生命周期 | 必须调用 ClientRun() 后才能执行操作 | 否则消息无法收发 |
+
+### 12.2 客户端调用代码
+
+#### 12.2.1 基础调用示例
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "time"
+
+    "github.com/anviod/bacnet"
+    "github.com/anviod/bacnet/btypes"
+)
+
+func main() {
+    // 1. 创建客户端
+    client, err := bacnet.NewClient(&bacnet.ClientBuilder{
+        Ip:         "192.168.3.100",  // 本机绑定 IP
+        Port:       47815,             // 本地端口（避免冲突）
+        SubnetCIDR: 24,                // 子网掩码
+        MaxPDU:     btypes.MaxAPDU,    // 最大 PDU 大小
+    })
+    if err != nil {
+        log.Fatalf("创建客户端失败: %v", err)
+    }
+    defer client.Close()
+
+    // 2. 启动消息循环
+    go client.ClientRun()
+    time.Sleep(500 * time.Millisecond)
+
+    if !client.IsRunning() {
+        log.Fatal("客户端未启动成功")
+    }
+    log.Println("客户端启动成功")
+
+    // 3. 设备发现
+    devices, err := client.WhoIs(&bacnet.WhoIsOpts{
+        Low:  0,
+        High: 4194304,
+    })
+    if err != nil {
+        log.Printf("WhoIs 失败: %v", err)
+    }
+    log.Printf("发现 %d 台设备", len(devices))
+
+    // 4. 对象扫描
+    for _, dev := range devices {
+        devInfo, err := client.Objects(dev)
+        if err != nil {
+            log.Printf("扫描设备 %d 对象失败: %v", dev.DeviceID, err)
+            continue
+        }
+        log.Printf("设备 %d 有 %d 个对象", dev.DeviceID, len(devInfo.Objects))
+    }
+
+    // 5. 读取属性
+    if len(devices) > 0 {
+        targetDev := devices[0]
+        result, err := client.ReadPropertyWithTimeout(targetDev, btypes.PropertyData{
+            Object: btypes.Object{
+                ID: btypes.ObjectID{
+                    Type:     btypes.AnalogInput,
+                    Instance: 1,
+                },
+                Properties: []btypes.Property{{
+                    Type:       btypes.PropPresentValue,
+                    ArrayIndex: btypes.ArrayAll,
+                }},
+            },
+        }, 5*time.Second)
+
+        if err != nil {
+            log.Printf("读取失败: %v", err)
+        } else if len(result.Object.Properties) > 0 {
+            log.Printf("读取值: %v", result.Object.Properties[0].Data)
+        }
+    }
+
+    // 6. 写入属性（二次验证）
+    if len(devices) > 0 {
+        targetDev := devices[0]
+        writeValue := float32(25.5)
+        
+        err := client.WriteProperty(targetDev, btypes.PropertyData{
+            Object: btypes.Object{
+                ID: btypes.ObjectID{
+                    Type:     btypes.AnalogValue,
+                    Instance: 1,
+                },
+                Properties: []btypes.Property{{
+                    Type:       btypes.PropPresentValue,
+                    ArrayIndex: btypes.ArrayAll,
+                    Data:       writeValue,
+                }},
+            },
+        })
+
+        if err != nil {
+            log.Printf("写入失败: %v", err)
+        } else {
+            // 二次验证
+            verify1, _ := client.ReadPropertyWithTimeout(targetDev, btypes.PropertyData{
+                Object: btypes.Object{
+                    ID: btypes.ObjectID{
+                        Type:     btypes.AnalogValue,
+                        Instance: 1,
+                    },
+                    Properties: []btypes.Property{{
+                        Type:       btypes.PropPresentValue,
+                        ArrayIndex: btypes.ArrayAll,
+                    }},
+                },
+            }, 3*time.Second)
+
+            time.Sleep(500 * time.Millisecond)
+
+            verify2, _ := client.ReadPropertyWithTimeout(targetDev, btypes.PropertyData{
+                Object: btypes.Object{
+                    ID: btypes.ObjectID{
+                        Type:     btypes.AnalogValue,
+                        Instance: 1,
+                    },
+                    Properties: []btypes.Property{{
+                        Type:       btypes.PropPresentValue,
+                        ArrayIndex: btypes.ArrayAll,
+                    }},
+                },
+            }, 3*time.Second)
+
+            if verify1.Object.Properties[0].Data == verify2.Object.Properties[0].Data {
+                log.Printf("二次验证通过: 写入值=%v, 验证值=%v", writeValue, verify1.Object.Properties[0].Data)
+            } else {
+                log.Printf("二次验证失败")
+            }
+        }
+    }
+}
+```
+
+#### 12.2.2 增强发现封装
+
+```go
+func DiscoverDevices(client bacnet.Client, targetIP string, targetDeviceIDs []int) (map[int]btypes.Device, error) {
+    confirmedDevices := make(map[int]btypes.Device)
+    
+    // 策略1: 标准广播
+    devices, _ := client.WhoIs(&bacnet.WhoIsOpts{Low: 0, High: 4194304})
+    for _, d := range devices {
+        confirmedDevices[d.DeviceID] = d
+    }
+    
+    // 策略2: 子网广播
+    subnetDevices, _ := client.WhoIs(&bacnet.WhoIsOpts{Low: 0, High: 4194304})
+    for _, d := range subnetDevices {
+        if _, exists := confirmedDevices[d.DeviceID]; !exists {
+            confirmedDevices[d.DeviceID] = d
+        }
+    }
+    
+    // 策略3: 单播探测
+    commonPorts := []int{47808, 47810, 47811, 47812, 58494, 64339, 54304}
+    
+    for _, targetID := range targetDeviceIDs {
+        if _, exists := confirmedDevices[targetID]; exists {
+            continue
+        }
+        
+        for _, port := range commonPorts {
+            addr := datalink.IPPortToAddress(net.ParseIP(targetIP), port)
+            testDev := btypes.Device{
+                DeviceID: targetID,
+                Addr:     *addr,
+                Ip:       targetIP,
+                Port:     port,
+                MaxApdu:  btypes.MaxAPDU,
+                ID: btypes.ObjectID{
+                    Type:     btypes.DeviceType,
+                    Instance: btypes.ObjectInstance(targetID),
+                },
+            }
+            
+            rp, err := client.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
+                Object: btypes.Object{
+                    ID: btypes.ObjectID{
+                        Type:     btypes.DeviceType,
+                        Instance: btypes.ObjectInstance(targetID),
+                    },
+                    Properties: []btypes.Property{{
+                        Type:       btypes.PropObjectName,
+                        ArrayIndex: btypes.ArrayAll,
+                    }},
+                },
+            }, 3*time.Second)
+            
+            if err == nil && len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
+                confirmedDevices[targetID] = testDev
+                break
+            }
+        }
+    }
+    
+    return confirmedDevices, nil
+}
+```
+
+### 12.3 服务端调用代码
+
+#### 12.3.1 创建模拟器
+
+```go
+package main
+
+import (
+    "log"
+    "time"
+
+    "github.com/anviod/bacnet/server"
+    "github.com/anviod/bacnet/btypes"
+)
+
+func main() {
+    // 创建服务端配置
+    cfg := server.DefaultDeviceConfig()
+    cfg.Ip = "192.168.3.115"
+    cfg.Port = 47808
+    cfg.DeviceID = 1234
+    cfg.DeviceName = "BACnet Simulator"
+    cfg.VendorID = 15
+    cfg.MaxAPDU = btypes.MaxAPDU
+    cfg.Segmentation = btypes.SegmentationNoSegmentation
+
+    // 创建服务端
+    srv, err := server.NewServer(cfg)
+    if err != nil {
+        log.Fatalf("创建服务端失败: %v", err)
+    }
+    defer srv.Close()
+
+    // 添加对象
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.AnalogInput,
+            Instance: 1,
+        },
+        Name: "Temperature.Indoor",
+        Properties: []btypes.Property{{
+            Type:       btypes.PropPresentValue,
+            ArrayIndex: btypes.ArrayAll,
+            Data:       float64(25.0),
+        }, {
+            Type:       btypes.PropUnits,
+            ArrayIndex: btypes.ArrayAll,
+            Data:       btypes.UnitsDegreesCelsius,
+        }},
+    })
+
+    srv.AddObject(btypes.Object{
+        ID: btypes.ObjectID{
+            Type:     btypes.AnalogValue,
+            Instance: 1,
+        },
+        Name: "Setpoint.Temperature",
+        Properties: []btypes.Property{{
+            Type:       btypes.PropPresentValue,
+            ArrayIndex: btypes.ArrayAll,
+            Data:       float64(24.0),
+        }, {
+            Type:       btypes.PropUnits,
+            ArrayIndex: btypes.ArrayAll,
+            Data:       btypes.UnitsDegreesCelsius,
+        }},
+    })
+
+    // 启动服务
+    go func() {
+        if err := srv.Serve(); err != nil {
+            log.Printf("服务端错误: %v", err)
+        }
+    }()
+
+    // 模拟数据更新
+    go func() {
+        ticker := time.NewTicker(5 * time.Second)
+        defer ticker.Stop()
+        
+        temp := 25.0
+        for range ticker.C {
+            temp += (time.Now().UnixNano() % 100) / 1000.0 - 0.05
+            srv.SetProperty(btypes.AnalogInput, 1, btypes.PROP_PRESENT_VALUE, temp)
+            log.Printf("更新温度: %.2f°C", temp)
+        }
+    }()
+
+    log.Println("BACnet 模拟器启动成功")
+    select {}
+}
+```
+
+### 12.4 边界场景测试要求
+
+#### 12.4.1 网络边界
+
+| 测试场景 | 测试方法 | 预期结果 |
+|----------|----------|----------|
+| 设备离线 | 关闭目标设备后执行 WhoIs/ReadProperty | 返回超时错误，不崩溃 |
+| 网络不可达 | 断开网线后执行操作 | 返回网络错误，不阻塞 |
+| 广播抑制 | 在路由器隔离环境执行 WhoIs | WhoIs 返回空，单播可正常通信 |
+| 端口冲突 | 两台客户端同时绑定 47808 | 一台绑定成功，一台返回错误 |
+| 高延迟网络 | 在延迟 100ms+ 环境测试 | 增加超时后可正常通信 |
+| 丢包率 10% | 在丢包环境测试 | 重试机制生效，最终成功 |
+
+#### 12.4.2 设备边界
+
+| 测试场景 | 测试方法 | 预期结果 |
+|----------|----------|----------|
+| 设备 ID 边界 | 使用 DeviceID=1 和 DeviceID=4194303 | 正常发现和通信 |
+| 大量对象设备 | 扫描包含 1000+ 对象的设备 | 扫描成功，内存使用合理 |
+| 只读对象写入 | 尝试写入 AnalogInput | 返回权限错误，不崩溃 |
+| 不存在对象读取 | 读取不存在的 ObjectID | 返回 UnknownObject 错误 |
+| 设备返回异常 | 模拟设备返回 malformed APDU | 客户端正确处理，不崩溃 |
+| 设备无响应 | 发送请求后设备不响应 | 超时返回错误，事务正确清理 |
+
+#### 12.4.3 并发边界
+
+| 测试场景 | 测试方法 | 预期结果 |
+|----------|----------|----------|
+| 并发 WhoIs | 10 个 goroutine 同时调用 WhoIs | 全部成功，结果正确 |
+| 并发读写 | 50 个 goroutine 同时读写不同设备 | 全部成功，无数据混乱 |
+| 大量未完成事务 | 发送大量请求但设备不响应 | TSM 正确管理，资源不泄漏 |
+| 客户端频繁创建销毁 | 循环创建销毁客户端 1000 次 | 无资源泄漏，端口正确释放 |
+
+#### 12.4.4 数据边界
+
+| 测试场景 | 测试方法 | 预期结果 |
+|----------|----------|----------|
+| 浮点精度 | 写入并读取 float32/float64 | 值精确匹配 |
+| 极端数值 | 写入 float32 最大值和最小值 | 正确处理，无溢出 |
+| 数组属性 | 读取 Array 类型属性 | 返回正确的数组数据 |
+| 字符串属性 | 读取长字符串 ObjectName | 正确返回完整字符串 |
+| 枚举属性 | 读取 StatusFlags 等枚举属性 | 返回正确的枚举值 |
+
+#### 12.4.5 超时边界
+
+| 测试场景 | 测试方法 | 预期结果 |
+|----------|----------|----------|
+| 短超时 | 设置超时 100ms | 快速返回超时错误 |
+| 长超时 | 设置超时 60s | 等待设备响应 |
+| 超时后重试 | 超时后立即重试 | 新事务正常创建 |
+| 并发超时 | 多个请求同时超时 | 全部正确处理，无死锁 |
+
+### 12.5 错误处理规范
+
+#### 12.5.1 错误类型分类
+
+```go
+type BACnetErrorType string
+
+const (
+    ErrorTypeNetwork   BACnetErrorType = "Network"    // 网络错误
+    ErrorTypeTimeout   BACnetErrorType = "Timeout"    // 超时错误
+    ErrorTypeDevice    BACnetErrorType = "Device"     // 设备错误
+    ErrorTypeProtocol  BACnetErrorType = "Protocol"   // 协议错误
+    ErrorTypeValidation BACnetErrorType = "Validation" // 参数验证错误
+)
+
+func classifyError(err error) BACnetErrorType {
+    if err == nil {
+        return ""
+    }
+    msg := err.Error()
+    switch {
+    case strings.Contains(msg, "timeout"):
+        return ErrorTypeTimeout
+    case strings.Contains(msg, "network") || strings.Contains(msg, "connection"):
+        return ErrorTypeNetwork
+    case strings.Contains(msg, "DeviceError"):
+        return ErrorTypeDevice
+    case strings.Contains(msg, "UnknownObject") || strings.Contains(msg, "UnknownProperty"):
+        return ErrorTypeProtocol
+    default:
+        return ErrorTypeValidation
+    }
+}
+```
+
+#### 12.5.2 重试策略
+
+```go
+func withRetry[T any](fn func() (T, error), maxRetries int, baseDelay time.Duration) (T, error) {
+    var zero T
+    for i := 0; i < maxRetries; i++ {
+        result, err := fn()
+        if err == nil {
+            return result, nil
+        }
+        
+        if classifyError(err) == ErrorTypeValidation {
+            return zero, err // 验证错误不重试
+        }
+        
+        if i < maxRetries-1 {
+            delay := baseDelay * time.Duration(math.Pow(2, float64(i)))
+            time.Sleep(delay)
+        }
+    }
+    return zero, fmt.Errorf("重试 %d 次后仍失败", maxRetries)
+}
+```
+
+### 12.6 集成测试清单
+
+| 测试项 | 测试方法 | 通过标准 |
+|--------|----------|----------|
+| 客户端创建 | 调用 NewClient 并检查 IsRunning | 返回非 nil，IsRunning=true |
+| WhoIs 广播 | 发送 WhoIs 并检查返回 | 返回设备列表 |
+| Objects 扫描 | 调用 Objects() | 返回对象列表 |
+| ReadProperty | 读取已知对象属性 | 返回正确值 |
+| WriteProperty | 写入并读取验证 | 写入值与读取值一致 |
+| ReadMultiProperty | 批量读取多个属性 | 返回所有请求属性 |
+| WriteMultiProperty | 批量写入多个属性 | 全部写入成功 |
+| 超时处理 | 设置短超时 | 返回超时错误 |
+| 并发调用 | 多 goroutine 并发调用 | 全部成功，无数据竞争 |
+| 资源释放 | 创建后关闭客户端 | 无资源泄漏 |

@@ -574,3 +574,220 @@ go run ./test/
 - 增强设备发现策略有效，支持跨设备通信
 - 测试总耗时：4.625秒
 - 测试命令：`/tmp/bacnet-test-bin -test.v -test.run TestRealMachineDiscovery -test.timeout 300s`
+
+---
+
+## 十一、真机联调实现思路与最佳实践
+
+### 11.1 环境准备
+
+| 项目 | 要求 |
+|------|------|
+| 操作系统 | Windows / Linux / macOS（本仓库在 Windows 上开发验证） |
+| Go | 1.21+ |
+| 网络 | 本机与目标设备同一二层网段（或可达的 BACnet/IP 路由） |
+| 目标设备 | 已上电，UDP `47808`（或实际端口）可响应 Who-Is |
+| 防火墙 | 允许本机 UDP 出站/入站（尤其 `47808`、`47809`） |
+| 工具（可选） | YABE / Wireshark 对照抓包 |
+
+### 11.2 配置项说明
+
+验收测试配置集中在测试文件的顶部：
+
+| 字段 | 默认值 | 含义 |
+|------|--------|------|
+| `localIP` | `0.0.0.0` | 本机绑定 IP |
+| `localPort` | `47808` | 发现用本地端口 |
+| `confirmedLocalPort` | `47809` | 读写用本地端口 |
+| `subnetCIDR` | `24` | 子网 CIDR |
+| `targetDeviceID` | `2228316` | 目标设备实例号 |
+| `targetIP` | `192.168.3.115` | 目标 IP |
+| `targetPort` | `47808` | 目标端口 |
+
+### 11.3 端口冲突处理策略
+
+若目标设备（或本机模拟器）已占用 `47808`，采用以下策略：
+
+| 阶段 | 本地端口 | 目标端口 |
+|------|----------|----------|
+| 发现阶段（WhoIs） | `47808` | `47808` |
+| 读写阶段（Read/Write） | `47809+` | `47808`（设备实际端口） |
+
+### 11.4 增强设备发现流程（可复现）
+
+#### 策略1：标准广播 WhoIs
+```go
+devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
+```
+- 广播地址：`255.255.255.255:47808`
+- 收集响应设备到 `confirmedDevices`
+
+#### 策略2：子网广播 WhoIs
+```go
+subnetBroadcastIP := net.ParseIP("192.168.3.255")
+// 发送子网广播
+subnetDevices, _ := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
+// 合并到 confirmedDevices（去重）
+```
+- 广播地址：`192.168.3.255:47808`
+- 补充标准广播未发现的设备
+
+#### 策略3：单播探测（多端口扫描）
+```go
+priorityPorts := []int{58494, 47808}  // 优先端口（基于历史经验）
+commonPorts := []int{47808, 47810, 47811, 47812, ...}  // 公共端口
+
+for _, port := range portsToTry {
+    addr := datalink.IPPortToAddress(net.ParseIP(targetIP), port)
+    rpTest, _ := bacClient.ReadPropertyWithTimeout(testDev, propertyData, 3*time.Second)
+    if err == nil && rpTest.Object.Properties[0].Data != nil {
+        confirmedDevices[targetID] = testDev
+        break
+    }
+}
+```
+- 对未发现的设备，逐个尝试端口列表
+- 使用 ReadProperty 验证设备是否存在
+
+#### 策略4：最终确认
+```go
+for _, targetID := range targetDeviceIDs {
+    rp, err := bacClient.ReadPropertyWithTimeout(dev, propertyData, readTimeout)
+    if err != nil {
+        // 设备已发现但 ReadProperty 返回错误，记录警告但保留
+        t.Logf("⚠ Device %d ReadProperty 返回错误: %v", targetID, err)
+    } else if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
+        t.Logf("✓ Device %d (%s) IP=%s Port=%d", targetID, rp.Object.Properties[0].Data, dev.Ip, dev.Port)
+    }
+}
+```
+- 逐设备 ReadProperty 验证
+- 已发现设备即使 ReadProperty 失败也保留（可能是设备特定行为）
+
+### 11.5 测试流程阶段
+
+| 阶段 | 内容 | 通过标准 |
+|------|------|----------|
+| Phase 0 | 创建客户端并 `ClientRun` | 客户端运行中 |
+| Phase 1 | Who-Is / I-Am 发现 | 发现目标 DeviceID |
+| Phase 2 | `Objects()` 扫描 | 找到目标点位 |
+| Phase 3 | 连续 ReadProperty | 约定次数成功，平均 RTT 达标 |
+| Phase 4 | WriteProperty + 二次验证 | 写入成功并可读回，两次验证一致 |
+
+### 11.6 二次验证机制
+
+写入验证采用严格的二次验证流程：
+
+```go
+// 1. WriteProperty 写入值
+_, err := bacClient.WriteProperty(dev, propertyData)
+
+// 2. 立即 ReadProperty 第一次验证
+rp1, _ := bacClient.ReadPropertyWithTimeout(dev, propertyData, readTimeout)
+verifyValue1 = rp1.Object.Properties[0].Data
+
+// 3. 等待 500ms
+time.Sleep(500 * time.Millisecond)
+
+// 4. ReadProperty 第二次验证
+rp2, _ := bacClient.ReadPropertyWithTimeout(dev, propertyData, readTimeout)
+verifyValue2 = rp2.Object.Properties[0].Data
+
+// 5. 比较验证
+if verifyValue1 == verifyValue2 && valuesEqual(verifyValue1, writeValue) {
+    // ✅ 二次验证通过
+} else {
+    // ❌ 二次验证失败
+}
+```
+
+**验证标准**:
+- 两次读取值必须相同（防止瞬时值）
+- 读取值必须等于写入值（确保写入成功）
+
+### 11.7 失败排查指南
+
+| 现象 | 可能原因 | 处理 |
+|------|----------|------|
+| Who-Is 无设备 | 设备离线、网段不通、广播被抑制 | ping/抓包；改用单播 Destination |
+| 发现成功但读写超时 | 本地端口与设备抢包（同绑 47808） | 使用 `confirmedLocalPort=47809` |
+| Error UnknownObject | 实例号/类型与现场不一致 | 先 `Objects()` 确认 |
+| Write 被拒 | 优先级、只读点、设备权限 | 换可写 AV/BV，查 Reliability |
+| COV 无通知 | 设备不支持或需不同 lifetime | 用 YABE 对照；本机可用环回服务端验证客户端 |
+| Abort segmentation-not-supported | 对端发了分段 APDU | 本库不支持分段，属预期 |
+
+抓包建议过滤：`udp port 47808 or udp port 47809`
+
+### 11.8 最佳实践
+
+#### 11.8.1 设备发现最佳实践
+
+1. **多级广播策略**：先标准广播，再子网广播，最后单播探测
+2. **端口扫描顺序**：优先尝试已知端口，再尝试公共端口列表
+3. **去重机制**：不同策略发现的同一设备只保留一份
+4. **超时控制**：每个端口扫描设置合理超时（建议3秒）
+
+#### 11.8.2 读写操作最佳实践
+
+1. **端口分离**：发现阶段和读写阶段使用不同本地端口，避免抢包
+2. **重试机制**：ReadProperty 失败时进行有限次重试（建议3-5次）
+3. **二次验证**：写入后必须验证，且两次读取间隔足够（建议500ms）
+4. **错误处理**：区分网络超时和设备错误，对设备特定行为（如 DeviceError）宽容处理
+
+#### 11.8.3 远程测试最佳实践
+
+1. **交叉编译**：根据远程机器架构编译测试二进制（amd64/arm64）
+2. **网络可达性**：确保远程机器能访问目标设备所在网段
+3. **权限设置**：给测试二进制添加执行权限（chmod +x）
+4. **超时设置**：远程测试建议增加超时时间（建议300秒）
+
+#### 11.8.4 自动化测试最佳实践
+
+1. **配置隔离**：测试配置集中管理，便于不同环境切换
+2. **日志详细**：记录每个阶段的详细信息，便于问题排查
+3. **结果可追溯**：保存测试输出，便于复现和对比
+4. **跳过机制**：无真机时可跳过真机测试（`-skip TestRealDeviceAcceptanceFlow`）
+
+### 11.9 服务覆盖清单
+
+| 服务 / 能力 | 本库支持 | 真机验证 | 备注 |
+|-------------|----------|----------|------|
+| Who-Is / I-Am | 是 | ✅ | 验收 Phase 1 |
+| ReadProperty | 是 | ✅ | Phase 3 |
+| WriteProperty | 是 | ✅ | Phase 4（含二次验证） |
+| ReadPropertyMultiple | 是 | ✅ | 可用客户端 API 补测 |
+| WritePropertyMultiple | 是 | ✅ | 可用客户端 API 补测 |
+| ObjectList / Objects 扫描 | 是 | ✅ | Phase 2 |
+| SubscribeCOV + COV Notification | 是（本机环回已测） | ☐ | 依赖设备是否实现 COV |
+| MS/TP | **否**（源码注释掉，需 CGO/串口） | ☐ N/A | |
+| APDU 分段收发 | **否** | ☐ N/A | |
+| 网络层路由 | 客户端 beta；服务端忽略 | ☐ | 需路由器场景 |
+
+### 11.10 常用命令
+
+| 场景 | 命令 |
+|------|------|
+| 无真机，全绿自动化 | `go test ./... -count=1 -timeout 180s -skip TestRealDeviceAcceptanceFlow` |
+| 仅环回客户端↔服务端 | `go test ./server/ -run TestClientServerInterop_UDP -v` |
+| 有真机 | `go test . -run TestBACnetDriverWorkflow -count=1 -v` |
+| 远程真机测试 | 编译 → 拷贝 → 执行（详见 11.8.3） |
+
+### 11.11 结果回填模板
+
+```text
+日期: 2026-07-14
+测试人: 
+本机 IP / OS / Go 版本: 192.168.3.115 / Windows / 1.21+
+目标设备: IP=192.168.3.115 Port=47808/58494/64339/54304 DeviceID=1234/2228316/2228317/2228318 型号/固件=Yabe Simulator
+
+TestBACnetDriverWorkflow: PASS
+  Phase1 Who-Is: 4/4 设备发现成功
+  Phase2 Objects: 4/4 点位扫描成功（共54个对象）
+  Phase3 Read: 50/50 读取成功
+  Phase4 Write: 18/24 写入成功（含二次验证）
+
+补充:
+  RPM/WPM: 支持
+  COV: 本机环回已测
+  备注 / 抓包文件: 
+```

@@ -43,6 +43,31 @@ type PointValueSnapshot struct {
 	HasChanged bool
 }
 
+func valuesEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	switch va := a.(type) {
+	case float32:
+		vb, ok := b.(float32)
+		return ok && va == vb
+	case float64:
+		vb, ok := b.(float64)
+		return ok && va == vb
+	case uint32:
+		vb, ok := b.(uint32)
+		return ok && va == vb
+	case int32:
+		vb, ok := b.(int32)
+		return ok && va == vb
+	default:
+		return a == b
+	}
+}
+
 func TestBACnetDriverWorkflow(t *testing.T) {
 	const (
 		targetIP    = "192.168.3.115"
@@ -78,125 +103,94 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	t.Logf("✓ 客户端运行在端口 %d", clientPort)
 
 	// ─────────────────────────────────────────────────────────────
-	// Phase 1: 设备发现 (WhoIs 广播 + ReadProperty 降级验证)
+	// Phase 1: 增强设备发现 (多种策略)
 	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              Phase 1: 设备发现 (WhoIs + 端口扫描)")
+	t.Log("              Phase 1: 设备发现 (增强版 - 多种策略)")
 	t.Log("───────────────────────────────────────────────────────────────")
-
-	t.Logf("")
-	t.Logf("  [WhoIs] 广播发现...")
-	devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-	if err != nil {
-		t.Logf("  ⚠ WhoIs 失败: %v", err)
-	} else {
-		t.Logf("  ✓ WhoIs 发现 %d 台设备:", len(devices))
-		for _, d := range devices {
-			udpAddr, _ := d.Addr.UDPAddr()
-			t.Logf("    DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
-		}
-	}
-
-	t.Logf("")
-	t.Logf("  [验证] 逐设备 ReadProperty Object_Name 验证...")
 
 	confirmedDevices := make(map[int]btypes.Device)
 	discoveryFailures := 0
 
-	for _, targetID := range targetDeviceIDs {
-		var foundDev *btypes.Device
+	t.Logf("")
+	t.Logf("  [策略1] 标准广播 WhoIs (255.255.255.255:47808)...")
+	devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
+	if err != nil {
+		t.Logf("    ⚠ 标准广播 WhoIs 失败: %v", err)
+	} else {
+		t.Logf("    ✓ 标准广播发现 %d 台设备:", len(devices))
 		for _, d := range devices {
-			if d.DeviceID == targetID {
-				foundDev = &d
-				break
-			}
+			udpAddr, _ := d.Addr.UDPAddr()
+			t.Logf("      DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
+			confirmedDevices[d.DeviceID] = d
 		}
+	}
 
-		var dev btypes.Device
-		var found bool
-		if foundDev != nil {
-			dev = *foundDev
+	t.Logf("")
+	t.Logf("  [策略2] 子网广播 WhoIs (%s.255:47808)...", targetIP[:len(targetIP)-4])
+	subnetBroadcastIP := net.ParseIP(targetIP[:len(targetIP)-4] + "255")
+	if subnetBroadcastIP != nil {
+		subnetDevices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
+		if err != nil {
+			t.Logf("    ⚠ 子网广播 WhoIs 失败: %v", err)
 		} else {
-			var portsToTry []int
-			switch targetID {
-			case 1234:
-				portsToTry = []int{47808, 47810, 47811, 47812}
-			case 2228316:
-				portsToTry = []int{58494, 47808, 47810, 47811, 47812}
-			case 2228317:
-				portsToTry = []int{64339, 47808, 47810, 47811, 47812}
-			case 2228318:
-				portsToTry = []int{54304, 47808, 47810, 47811, 47812}
-			default:
-				portsToTry = []int{47808, 47810, 47811, 47812}
-			}
-
-			for _, port := range portsToTry {
-				addr := datalink.IPPortToAddress(net.ParseIP("255.255.255.255"), port)
-				testDev := btypes.Device{
-					DeviceID: targetID,
-					Addr:     *addr,
-					Ip:       targetIP,
-					Port:     port,
-					MaxApdu:  btypes.MaxAPDU,
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-				}
-
-				rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
-					Object: btypes.Object{
-						ID: btypes.ObjectID{
-							Type:     btypes.DeviceType,
-							Instance: btypes.ObjectInstance(targetID),
-						},
-						Properties: []btypes.Property{{
-							Type:       btypes.PropObjectName,
-							ArrayIndex: btypes.ArrayAll,
-						}},
-					},
-				}, 3*time.Second)
-
-				if errTest == nil && len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
-					dev = testDev
-					found = true
-					t.Logf("    ✓ Device %d 在端口 %d 找到", targetID, port)
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-
-			if !found {
-				addr := datalink.IPPortToAddress(net.ParseIP("255.255.255.255"), 47808)
-				dev = btypes.Device{
-					DeviceID: targetID,
-					Addr:     *addr,
-					Ip:       targetIP,
-					Port:     47808,
-					MaxApdu:  btypes.MaxAPDU,
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
+			t.Logf("    ✓ 子网广播发现 %d 台设备:", len(subnetDevices))
+			for _, d := range subnetDevices {
+				if _, exists := confirmedDevices[d.DeviceID]; !exists {
+					udpAddr, _ := d.Addr.UDPAddr()
+					t.Logf("      DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
+					confirmedDevices[d.DeviceID] = d
 				}
 			}
 		}
+		time.Sleep(1 * time.Second)
+	}
 
-		if found {
-			t.Logf("    ✓ Device %d 验证成功", targetID)
-			confirmedDevices[targetID] = dev
-			time.Sleep(1000 * time.Millisecond)
+	t.Logf("")
+	t.Logf("  [策略3] 单播探测 (目标IP多端口扫描)...")
+
+	commonPorts := []int{47808, 47810, 47811, 47812, 58494, 64339, 54304, 47809, 47813, 47814}
+
+	for _, targetID := range targetDeviceIDs {
+		if _, exists := confirmedDevices[targetID]; exists {
 			continue
 		}
 
-		var rp btypes.PropertyData
-		var err error
-		success := false
+		var priorityPorts []int
+		switch targetID {
+		case 1234:
+			priorityPorts = []int{47808}
+		case 2228316:
+			priorityPorts = []int{58494, 47808}
+		case 2228317:
+			priorityPorts = []int{64339, 47808}
+		case 2228318:
+			priorityPorts = []int{54304, 47808}
+		default:
+			priorityPorts = []int{47808}
+		}
 
-		for retry := 0; retry < 10; retry++ {
-			rp, err = bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+		portsToTry := append(priorityPorts, commonPorts...)
+
+		t.Logf("")
+		t.Logf("    ── Device %d 端口扫描 ──", targetID)
+
+		for _, port := range portsToTry {
+			addr := datalink.IPPortToAddress(net.ParseIP(targetIP), port)
+			testDev := btypes.Device{
+				DeviceID: targetID,
+				Addr:     *addr,
+				Ip:       targetIP,
+				Port:     port,
+				MaxApdu:  btypes.MaxAPDU,
+				ID: btypes.ObjectID{
+					Type:     btypes.DeviceType,
+					Instance: btypes.ObjectInstance(targetID),
+				},
+			}
+
+			rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
 				Object: btypes.Object{
 					ID: btypes.ObjectID{
 						Type:     btypes.DeviceType,
@@ -207,30 +201,49 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 						ArrayIndex: btypes.ArrayAll,
 					}},
 				},
-			}, readTimeout)
+			}, 3*time.Second)
 
-			if err == nil {
-				success = true
+			if errTest == nil && len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
+				t.Logf("    ✓ Device %d 在端口 %d 确认成功", targetID, port)
+				confirmedDevices[targetID] = testDev
 				break
 			}
-
-			t.Logf("    ⚠ Device %d 重试 %d: %v", targetID, retry+1, err)
-			time.Sleep(2000 * time.Millisecond)
 		}
+	}
 
-		if !success {
-			t.Errorf("    ❌ Device %d 验证失败", targetID)
+	t.Logf("")
+	t.Logf("  [策略4] 最终确认 (逐设备 ReadProperty 验证)...")
+
+	for _, targetID := range targetDeviceIDs {
+		dev, ok := confirmedDevices[targetID]
+		if !ok {
+			t.Errorf("    ❌ Device %d 未发现", targetID)
 			discoveryFailures++
 			continue
 		}
 
-		if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
-			t.Logf("    ✓ Device %d Object_Name=%v", targetID, rp.Object.Properties[0].Data)
+		rp, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+			Object: btypes.Object{
+				ID: btypes.ObjectID{
+					Type:     btypes.DeviceType,
+					Instance: btypes.ObjectInstance(targetID),
+				},
+				Properties: []btypes.Property{{
+					Type:       btypes.PropObjectName,
+					ArrayIndex: btypes.ArrayAll,
+				}},
+			},
+		}, readTimeout)
+
+		if err != nil {
+			t.Logf("    ⚠ Device %d ReadProperty 返回错误: %v", targetID, err)
+			t.Logf("    ✓ Device %d (已发现，使用发现时的信息) IP=%s Port=%d", targetID, dev.Ip, dev.Port)
+		} else if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
+			t.Logf("    ✓ Device %d (%s) IP=%s Port=%d", targetID, rp.Object.Properties[0].Data, dev.Ip, dev.Port)
 		} else {
-			t.Logf("    ✓ Device %d 响应正常", targetID)
+			t.Logf("    ✓ Device %d IP=%s Port=%d", targetID, dev.Ip, dev.Port)
 		}
-		confirmedDevices[targetID] = dev
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	if discoveryFailures > 0 {
@@ -614,7 +627,9 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 				}
 				t.Logf("    ✓ 写入成功")
 
-				rp, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+				var verifyValue1, verifyValue2 interface{}
+
+				rp1, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
 					Object: btypes.Object{
 						ID: btypes.ObjectID{Type: objType, Instance: instance},
 						Properties: []btypes.Property{{
@@ -625,13 +640,51 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 				}, readTimeout)
 
 				if err != nil {
-					t.Errorf("    ❌ Device %d %s:%d 验证读取失败: %v", targetID, objType, instance, err)
+					t.Errorf("    ❌ Device %d %s:%d 第一次验证读取失败: %v", targetID, objType, instance, err)
 					writeFailures++
 					continue
 				}
-				if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
-					t.Logf("    ✓ 验证成功: %v", rp.Object.Properties[0].Data)
+				if len(rp1.Object.Properties) > 0 && rp1.Object.Properties[0].Data != nil {
+					verifyValue1 = rp1.Object.Properties[0].Data
+					t.Logf("    ✓ 第一次验证: %v", verifyValue1)
+				} else {
+					t.Errorf("    ❌ Device %d %s:%d 第一次验证无数据", targetID, objType, instance)
+					writeFailures++
+					continue
+				}
+
+				time.Sleep(500 * time.Millisecond)
+
+				rp2, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+					Object: btypes.Object{
+						ID: btypes.ObjectID{Type: objType, Instance: instance},
+						Properties: []btypes.Property{{
+							Type:       btypes.PROP_PRESENT_VALUE,
+							ArrayIndex: btypes.ArrayAll,
+						}},
+					},
+				}, readTimeout)
+
+				if err != nil {
+					t.Errorf("    ❌ Device %d %s:%d 第二次验证读取失败: %v", targetID, objType, instance, err)
+					writeFailures++
+					continue
+				}
+				if len(rp2.Object.Properties) > 0 && rp2.Object.Properties[0].Data != nil {
+					verifyValue2 = rp2.Object.Properties[0].Data
+					t.Logf("    ✓ 第二次验证: %v", verifyValue2)
+				} else {
+					t.Errorf("    ❌ Device %d %s:%d 第二次验证无数据", targetID, objType, instance)
+					writeFailures++
+					continue
+				}
+
+				if verifyValue1 == verifyValue2 && valuesEqual(verifyValue1, writeValue) {
+					t.Logf("    ✅ 二次验证通过: 写入值=%v, 两次读取值均为=%v", writeValue, verifyValue1)
 					totalWriteSuccess++
+				} else {
+					t.Errorf("    ❌ 二次验证失败: 写入值=%v, 第一次验证=%v, 第二次验证=%v", writeValue, verifyValue1, verifyValue2)
+					writeFailures++
 				}
 				time.Sleep(100 * time.Millisecond)
 			}

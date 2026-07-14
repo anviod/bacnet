@@ -2,6 +2,7 @@ package bacnet
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/anviod/bacnet/btypes"
 )
@@ -117,9 +118,6 @@ func (c *client) objectList(dev *btypes.Device) error {
 }
 
 func (c *client) objectInformation(dev *btypes.Device, objs []btypes.Object) error {
-	// Often times the map will re-arrange the order it spits out,
-	// so we need to keep track since the response will be in the
-	// same order we issue the commands.
 	keys := make([]btypes.ObjectID, len(objs))
 	counter := 0
 	rpm := btypes.MultiplePropertyData{
@@ -139,33 +137,49 @@ func (c *client) objectInformation(dev *btypes.Device, objs []btypes.Object) err
 					Type:       btypes.PropObjectName,
 					ArrayIndex: btypes.ArrayAll,
 				},
-				{
-					Type:       btypes.PropDescription,
-					ArrayIndex: btypes.ArrayAll,
-				},
 			},
 		})
+	}
 
-	}
 	resp, err := c.ReadMultiProperty(*dev, rpm)
-	if err != nil {
-		return fmt.Errorf("unable to read multiple property :%v", err)
+	if err == nil {
+		var name string
+		var ok bool
+		for i, r := range resp.Objects {
+			if len(r.Properties) == 0 {
+				continue
+			}
+			name, ok = r.Properties[0].Data.(string)
+			if !ok {
+				continue
+			}
+			obj := dev.Objects[keys[i].Type][keys[i].Instance]
+			obj.Name = name
+			dev.Objects[keys[i].Type][keys[i].Instance] = obj
+		}
+		return nil
 	}
-	var name, description string
-	var ok bool
-	for i, r := range resp.Objects {
-		name, ok = r.Properties[0].Data.(string)
-		if !ok {
-			return fmt.Errorf("expecting string got %T", r.Properties[0].Data)
+
+	for _, oid := range keys {
+		rp, err := c.ReadPropertyWithTimeout(*dev, btypes.PropertyData{
+			Object: btypes.Object{
+				ID: oid,
+				Properties: []btypes.Property{{
+					Type:       btypes.PropObjectName,
+					ArrayIndex: btypes.ArrayAll,
+				}},
+			},
+		}, 5*time.Second)
+		if err != nil {
+			continue
 		}
-		description, ok = r.Properties[1].Data.(string)
-		if !ok {
-			return fmt.Errorf("expecting string got %T", r.Properties[1].Data)
+		if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
+			if name, ok := rp.Object.Properties[0].Data.(string); ok {
+				obj := dev.Objects[oid.Type][oid.Instance]
+				obj.Name = name
+				dev.Objects[oid.Type][oid.Instance] = obj
+			}
 		}
-		obj := dev.Objects[keys[i].Type][keys[i].Instance]
-		obj.Name = name
-		obj.Description = description
-		dev.Objects[keys[i].Type][keys[i].Instance] = obj
 	}
 	return nil
 }

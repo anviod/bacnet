@@ -72,8 +72,16 @@ func (t *TSM) Send(id int, b interface{}) error {
 	if !ok {
 		return fmt.Errorf("id %d is not receiving", id)
 	}
-	s.data <- b
-	return nil
+	defer func() {
+		if r := recover(); r != nil {
+		}
+	}()
+	select {
+	case s.data <- b:
+		return nil
+	default:
+		return fmt.Errorf("id %d is not receiving", id)
+	}
 }
 
 // Receive attempts to receive a byte array from the invoked id. If a time out

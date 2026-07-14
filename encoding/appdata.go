@@ -173,6 +173,12 @@ func (e *Encoder) AppData(i interface{}, typeBVBO bool) error {
 		return e.AppData(&val, false)
 	case null.Null:
 		e.tag(tagInfo{ID: tagNull, Context: appLayerContext})
+	case []interface{}:
+		for _, item := range val {
+			if err := e.AppData(item, false); err != nil {
+				return err
+			}
+		}
 	default:
 		err := fmt.Errorf("Unknown type %T", i)
 		// Set global error

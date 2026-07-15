@@ -11,18 +11,33 @@ import (
 
 func TestRealMachineDiscovery(t *testing.T) {
 	const (
-		localIP     = "192.168.3.115"
-		remoteIP    = "192.168.3.230"
-		readTimeout = 8 * time.Second
-		clientPort  = 47820
+		localIP       = "192.168.3.115"
+		remoteIP      = "192.168.3.230"
+		readTimeout   = 10 * time.Second
+		clientPort    = 47820
+		broadcastPort = 47808
 	)
 
-	targetDeviceIDs := []int{1234, 2228316, 2228317, 2228318}
+	type DeviceConfig struct {
+		ID   int
+		Port int
+	}
+
+	deviceConfigs := []DeviceConfig{
+		{ID: 1234, Port: 47810},
+		{ID: 2228316, Port: 58494},
+		{ID: 2228317, Port: 64339},
+		{ID: 2228318, Port: 54304},
+	}
 
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Log("         真机测试: 远程设备发现本机设备")
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Logf("本地 IP: %s, 远程 IP: %s, 客户端端口: %d", localIP, remoteIP, clientPort)
+	t.Logf("预配置设备列表:")
+	for _, cfg := range deviceConfigs {
+		t.Logf("  - DeviceID=%d, Port=%d", cfg.ID, cfg.Port)
+	}
 
 	startAll := time.Now()
 
@@ -46,114 +61,37 @@ func TestRealMachineDiscovery(t *testing.T) {
 
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              真机测试: 增强设备发现")
+	t.Log("              真机测试: 两步设备发现")
 	t.Log("───────────────────────────────────────────────────────────────")
 
 	confirmedDevices := make(map[int]btypes.Device)
-	discoveryFailures := 0
+	unfoundDevices := make(map[int]DeviceConfig)
 
 	t.Logf("")
-	t.Logf("  [策略1] 标准广播 WhoIs (255.255.255.255:47808)...")
-	devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-	if err != nil {
-		t.Logf("    ⚠ 标准广播 WhoIs 失败: %v", err)
-	} else {
-		t.Logf("    ✓ 标准广播发现 %d 台设备:", len(devices))
-		for _, d := range devices {
-			udpAddr, _ := d.Addr.UDPAddr()
-			t.Logf("      DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
-			confirmedDevices[d.DeviceID] = d
-		}
-	}
+	t.Logf("  Step 1: 使用用户提供的 ID+IP+Port 进行直接验证...")
 
-	t.Logf("")
-	t.Logf("  [策略2] 子网广播 WhoIs (%s.255:47808)...", localIP[:len(localIP)-4])
-	subnetBroadcastIP := net.ParseIP(localIP[:len(localIP)-4] + "255")
-	if subnetBroadcastIP != nil {
-		bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-		time.Sleep(2 * time.Second)
-	}
-
-	t.Logf("")
-	t.Logf("  [策略3] 单播探测 (目标IP多端口扫描)...")
-
-	commonPorts := []int{47808, 47810, 47811, 47812, 58494, 64339, 54304, 47809, 47813, 47814}
-
-	for _, targetID := range targetDeviceIDs {
-		if _, exists := confirmedDevices[targetID]; exists {
-			continue
-		}
-
-		var priorityPorts []int
-		switch targetID {
-		case 1234:
-			priorityPorts = []int{47808}
-		case 2228316:
-			priorityPorts = []int{58494, 47808}
-		case 2228317:
-			priorityPorts = []int{64339, 47808}
-		case 2228318:
-			priorityPorts = []int{54304, 47808}
-		default:
-			priorityPorts = []int{47808}
-		}
-
-		portsToTry := append(priorityPorts, commonPorts...)
-
+	for _, cfg := range deviceConfigs {
 		t.Logf("")
-		t.Logf("    ── Device %d 端口扫描 ──", targetID)
+		t.Logf("    ── Device %d 直接验证 ──", cfg.ID)
 
-		for _, port := range portsToTry {
-			addr := datalink.IPPortToAddress(net.ParseIP(localIP), port)
-			testDev := btypes.Device{
-				DeviceID: targetID,
-				Addr:     *addr,
-				Ip:       localIP,
-				Port:     port,
-				MaxApdu:  btypes.MaxAPDU,
-				ID: btypes.ObjectID{
-					Type:     btypes.DeviceType,
-					Instance: btypes.ObjectInstance(targetID),
-				},
-			}
-
-			rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
-				Object: btypes.Object{
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-					Properties: []btypes.Property{{
-						Type:       btypes.PropObjectName,
-						ArrayIndex: btypes.ArrayAll,
-					}},
-				},
-			}, 3*time.Second)
-
-			if errTest == nil && len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
-				t.Logf("    ✓ Device %d 在端口 %d 确认成功", targetID, port)
-				confirmedDevices[targetID] = testDev
-				break
-			}
-		}
-	}
-
-	t.Logf("")
-	t.Logf("  [策略4] 最终确认 (逐设备 ReadProperty 验证)...")
-
-	for _, targetID := range targetDeviceIDs {
-		dev, ok := confirmedDevices[targetID]
-		if !ok {
-			t.Errorf("    ❌ Device %d 未发现", targetID)
-			discoveryFailures++
-			continue
+		addr := datalink.IPPortToAddress(net.ParseIP(localIP), cfg.Port)
+		testDev := btypes.Device{
+			DeviceID: cfg.ID,
+			Addr:     *addr,
+			Ip:       localIP,
+			Port:     cfg.Port,
+			MaxApdu:  btypes.MaxAPDU,
+			ID: btypes.ObjectID{
+				Type:     btypes.DeviceType,
+				Instance: btypes.ObjectInstance(cfg.ID),
+			},
 		}
 
-		rp, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+		rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
 			Object: btypes.Object{
 				ID: btypes.ObjectID{
 					Type:     btypes.DeviceType,
-					Instance: btypes.ObjectInstance(targetID),
+					Instance: btypes.ObjectInstance(cfg.ID),
 				},
 				Properties: []btypes.Property{{
 					Type:       btypes.PropObjectName,
@@ -162,22 +100,65 @@ func TestRealMachineDiscovery(t *testing.T) {
 			},
 		}, readTimeout)
 
-		if err != nil {
-			t.Logf("    ⚠ Device %d ReadProperty 返回错误: %v", targetID, err)
-			t.Logf("    ✓ Device %d (已发现，使用发现时的信息) IP=%s Port=%d", targetID, dev.Ip, dev.Port)
-		} else if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
-			t.Logf("    ✓ Device %d (%s) IP=%s Port=%d", targetID, rp.Object.Properties[0].Data, dev.Ip, dev.Port)
+		if errTest != nil {
+			t.Logf("    ⚠ Device %d 直接验证失败: %v", cfg.ID, errTest)
+			t.Logf("      └─ 加入广播扫描队列")
+			unfoundDevices[cfg.ID] = cfg
+		} else if len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
+			t.Logf("    ✓ Device %d (%s) 验证成功", cfg.ID, rpTest.Object.Properties[0].Data)
+			t.Logf("      ├─ IP: %s", localIP)
+			t.Logf("      └─ Port: %d", cfg.Port)
+			confirmedDevices[cfg.ID] = testDev
 		} else {
-			t.Logf("    ✓ Device %d IP=%s Port=%d", targetID, dev.Ip, dev.Port)
+			t.Logf("    ✓ Device %d 验证成功 (无名称)", cfg.ID)
+			t.Logf("      ├─ IP: %s", localIP)
+			t.Logf("      └─ Port: %d", cfg.Port)
+			confirmedDevices[cfg.ID] = testDev
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	if len(unfoundDevices) > 0 {
+		t.Logf("")
+		t.Logf("  Step 2: 对未发现的设备使用广播方式扫描 (端口 %d)...", broadcastPort)
+
+		broadcastAddr := datalink.IPPortToAddress(net.ParseIP(localIP), broadcastPort)
+		whoIsOpts := &WhoIsOpts{
+			Low:             0,
+			High:            4194304,
+			Destination:     broadcastAddr,
+			GlobalBroadcast: false,
+		}
+
+		devices, err := bacClient.WhoIs(whoIsOpts)
+		if err != nil {
+			t.Logf("    ⚠ 广播扫描失败: %v", err)
+		} else {
+			foundCount := 0
+			for _, dev := range devices {
+				t.Logf("    ✉️ 收到 I-Am: DeviceID=%d, IP=%s:%d", dev.DeviceID, dev.Ip, dev.Port)
+				if _, ok := unfoundDevices[dev.DeviceID]; ok {
+					t.Logf("    ✓ Device %d 通过广播发现", dev.DeviceID)
+					t.Logf("      ├─ IP: %s", dev.Ip)
+					t.Logf("      ├─ Port: %d", dev.Port)
+					t.Logf("      └─ Type: 预配置设备")
+					confirmedDevices[dev.DeviceID] = dev
+					delete(unfoundDevices, dev.DeviceID)
+					foundCount++
+				}
+			}
+			if foundCount > 0 {
+				t.Logf("    ✓ 广播扫描成功发现 %d 台设备", foundCount)
+			}
+		}
+	}
+
+	discoveryFailures := len(deviceConfigs) - len(confirmedDevices)
 	if discoveryFailures > 0 {
 		t.Fatalf("❌ 真机测试失败: %d 台设备无法通信", discoveryFailures)
 	}
 
 	t.Logf("")
-	t.Logf("✅ 真机测试完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(targetDeviceIDs))
+	t.Logf("✅ 真机测试完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(deviceConfigs))
 	t.Logf("总耗时: %.3fs", time.Since(startAll).Seconds())
 }

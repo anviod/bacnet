@@ -63,24 +63,67 @@ func valuesEqual(a, b interface{}) bool {
 	case int32:
 		vb, ok := b.(int32)
 		return ok && va == vb
+	case []interface{}:
+		vb, ok := b.([]interface{})
+		if !ok || len(va) != len(vb) {
+			return false
+		}
+		for i := range va {
+			if !valuesEqual(va[i], vb[i]) {
+				return false
+			}
+		}
+		return true
+	case []uint8:
+		vb, ok := b.([]uint8)
+		if !ok || len(va) != len(vb) {
+			return false
+		}
+		for i := range va {
+			if va[i] != vb[i] {
+				return false
+			}
+		}
+		return true
+	case string:
+		vb, ok := b.(string)
+		return ok && va == vb
 	default:
-		return a == b
+		return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 	}
 }
 
 func TestBACnetDriverWorkflow(t *testing.T) {
 	const (
-		targetIP    = "192.168.3.115"
-		readTimeout = 8 * time.Second
-		clientPort  = 47815
+		targetIP         = "192.168.3.115"
+		readTimeout      = 10 * time.Second
+		clientPort       = 47815
+		broadcastPort    = 47808
+		discoveryTimeout = 10 * time.Second
 	)
 
-	targetDeviceIDs := []int{1234, 2228316, 2228317, 2228318}
+	type DeviceConfig struct {
+		ID   int
+		Port int
+		Type string
+	}
+
+	deviceConfigs := []DeviceConfig{
+		{ID: 1234, Port: 47810, Type: "room-simulator"},
+		{ID: 2228316, Port: 58494, Type: "Yabe simulator"},
+		{ID: 2228317, Port: 64339, Type: "Yabe simulator"},
+		{ID: 2228318, Port: 54304, Type: "Yabe simulator"},
+		{ID: 2228319, Port: 58301, Type: "Yabe simulator"},
+	}
 
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Log("         BACnet 驱动完整链路测试")
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Logf("目标 IP: %s, 客户端端口: %d", targetIP, clientPort)
+	t.Logf("预配置设备列表:")
+	for _, cfg := range deviceConfigs {
+		t.Logf("  - DeviceID=%d, Port=%d, Type=%s", cfg.ID, cfg.Port, cfg.Type)
+	}
 
 	startAll := time.Now()
 
@@ -103,130 +146,43 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	t.Logf("✓ 客户端运行在端口 %d", clientPort)
 
 	// ─────────────────────────────────────────────────────────────
-	// Phase 1: 增强设备发现 (多种策略)
+	// Phase 1: 设备发现 (两步扫描)
+	//   Step 1: 使用用户提供的 ID+IP+Port 进行直接验证
+	//   Step 2: 对未发现的设备，使用广播方式（47808端口）扫描
 	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              Phase 1: 设备发现 (增强版 - 多种策略)")
+	t.Log("              Phase 1: 设备发现 (两步扫描)")
 	t.Log("───────────────────────────────────────────────────────────────")
 
 	confirmedDevices := make(map[int]btypes.Device)
-	discoveryFailures := 0
+	unfoundDevices := make(map[int]DeviceConfig)
 
 	t.Logf("")
-	t.Logf("  [策略1] 标准广播 WhoIs (255.255.255.255:47808)...")
-	devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-	if err != nil {
-		t.Logf("    ⚠ 标准广播 WhoIs 失败: %v", err)
-	} else {
-		t.Logf("    ✓ 标准广播发现 %d 台设备:", len(devices))
-		for _, d := range devices {
-			udpAddr, _ := d.Addr.UDPAddr()
-			t.Logf("      DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
-			confirmedDevices[d.DeviceID] = d
-		}
-	}
+	t.Logf("  Step 1: 使用用户提供的 ID+IP+Port 进行直接验证...")
 
-	t.Logf("")
-	t.Logf("  [策略2] 子网广播 WhoIs (%s.255:47808)...", targetIP[:len(targetIP)-4])
-	subnetBroadcastIP := net.ParseIP(targetIP[:len(targetIP)-4] + "255")
-	if subnetBroadcastIP != nil {
-		subnetDevices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-		if err != nil {
-			t.Logf("    ⚠ 子网广播 WhoIs 失败: %v", err)
-		} else {
-			t.Logf("    ✓ 子网广播发现 %d 台设备:", len(subnetDevices))
-			for _, d := range subnetDevices {
-				if _, exists := confirmedDevices[d.DeviceID]; !exists {
-					udpAddr, _ := d.Addr.UDPAddr()
-					t.Logf("      DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
-					confirmedDevices[d.DeviceID] = d
-				}
-			}
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	t.Logf("")
-	t.Logf("  [策略3] 单播探测 (目标IP多端口扫描)...")
-
-	commonPorts := []int{47808, 47810, 47811, 47812, 58494, 64339, 54304, 47809, 47813, 47814}
-
-	for _, targetID := range targetDeviceIDs {
-		if _, exists := confirmedDevices[targetID]; exists {
-			continue
-		}
-
-		var priorityPorts []int
-		switch targetID {
-		case 1234:
-			priorityPorts = []int{47808}
-		case 2228316:
-			priorityPorts = []int{58494, 47808}
-		case 2228317:
-			priorityPorts = []int{64339, 47808}
-		case 2228318:
-			priorityPorts = []int{54304, 47808}
-		default:
-			priorityPorts = []int{47808}
-		}
-
-		portsToTry := append(priorityPorts, commonPorts...)
-
+	for _, cfg := range deviceConfigs {
 		t.Logf("")
-		t.Logf("    ── Device %d 端口扫描 ──", targetID)
+		t.Logf("    ── Device %d (%s) 直接验证 ──", cfg.ID, cfg.Type)
 
-		for _, port := range portsToTry {
-			addr := datalink.IPPortToAddress(net.ParseIP(targetIP), port)
-			testDev := btypes.Device{
-				DeviceID: targetID,
-				Addr:     *addr,
-				Ip:       targetIP,
-				Port:     port,
-				MaxApdu:  btypes.MaxAPDU,
-				ID: btypes.ObjectID{
-					Type:     btypes.DeviceType,
-					Instance: btypes.ObjectInstance(targetID),
-				},
-			}
-
-			rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
-				Object: btypes.Object{
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-					Properties: []btypes.Property{{
-						Type:       btypes.PropObjectName,
-						ArrayIndex: btypes.ArrayAll,
-					}},
-				},
-			}, 3*time.Second)
-
-			if errTest == nil && len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
-				t.Logf("    ✓ Device %d 在端口 %d 确认成功", targetID, port)
-				confirmedDevices[targetID] = testDev
-				break
-			}
-		}
-	}
-
-	t.Logf("")
-	t.Logf("  [策略4] 最终确认 (逐设备 ReadProperty 验证)...")
-
-	for _, targetID := range targetDeviceIDs {
-		dev, ok := confirmedDevices[targetID]
-		if !ok {
-			t.Errorf("    ❌ Device %d 未发现", targetID)
-			discoveryFailures++
-			continue
+		addr := datalink.IPPortToAddress(net.ParseIP(targetIP), cfg.Port)
+		testDev := btypes.Device{
+			DeviceID: cfg.ID,
+			Addr:     *addr,
+			Ip:       targetIP,
+			Port:     cfg.Port,
+			MaxApdu:  btypes.MaxAPDU,
+			ID: btypes.ObjectID{
+				Type:     btypes.DeviceType,
+				Instance: btypes.ObjectInstance(cfg.ID),
+			},
 		}
 
-		rp, err := bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
+		rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
 			Object: btypes.Object{
 				ID: btypes.ObjectID{
 					Type:     btypes.DeviceType,
-					Instance: btypes.ObjectInstance(targetID),
+					Instance: btypes.ObjectInstance(cfg.ID),
 				},
 				Properties: []btypes.Property{{
 					Type:       btypes.PropObjectName,
@@ -235,22 +191,67 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 			},
 		}, readTimeout)
 
-		if err != nil {
-			t.Logf("    ⚠ Device %d ReadProperty 返回错误: %v", targetID, err)
-			t.Logf("    ✓ Device %d (已发现，使用发现时的信息) IP=%s Port=%d", targetID, dev.Ip, dev.Port)
-		} else if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
-			t.Logf("    ✓ Device %d (%s) IP=%s Port=%d", targetID, rp.Object.Properties[0].Data, dev.Ip, dev.Port)
+		if errTest != nil {
+			t.Logf("    ⚠ Device %d 直接验证失败: %v", cfg.ID, errTest)
+			t.Logf("      └─ 加入广播扫描队列")
+			unfoundDevices[cfg.ID] = cfg
+		} else if len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
+			t.Logf("    ✓ Device %d (%s) 验证成功", cfg.ID, rpTest.Object.Properties[0].Data)
+			t.Logf("      ├─ IP: %s", targetIP)
+			t.Logf("      ├─ Port: %d", cfg.Port)
+			t.Logf("      └─ Type: %s", cfg.Type)
+			confirmedDevices[cfg.ID] = testDev
 		} else {
-			t.Logf("    ✓ Device %d IP=%s Port=%d", targetID, dev.Ip, dev.Port)
+			t.Logf("    ✓ Device %d 验证成功 (无名称)", cfg.ID)
+			t.Logf("      ├─ IP: %s", targetIP)
+			t.Logf("      ├─ Port: %d", cfg.Port)
+			t.Logf("      └─ Type: %s", cfg.Type)
+			confirmedDevices[cfg.ID] = testDev
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	if len(unfoundDevices) > 0 {
+		t.Logf("")
+		t.Logf("  Step 2: 对未发现的设备使用广播方式扫描 (端口 %d)...", broadcastPort)
+
+		broadcastAddr := datalink.IPPortToAddress(net.ParseIP(targetIP), broadcastPort)
+		whoIsOpts := &WhoIsOpts{
+			Low:             0,
+			High:            4194304,
+			Destination:     broadcastAddr,
+			GlobalBroadcast: false,
+		}
+
+		devices, err := bacClient.WhoIs(whoIsOpts)
+		if err != nil {
+			t.Logf("    ⚠ 广播扫描失败: %v", err)
+		} else {
+			foundCount := 0
+			for _, dev := range devices {
+				t.Logf("    ✉️ 收到 I-Am: DeviceID=%d, IP=%s:%d", dev.DeviceID, dev.Ip, dev.Port)
+				if cfg, ok := unfoundDevices[dev.DeviceID]; ok {
+					t.Logf("    ✓ Device %d 通过广播发现", dev.DeviceID)
+					t.Logf("      ├─ IP: %s", dev.Ip)
+					t.Logf("      ├─ Port: %d", dev.Port)
+					t.Logf("      └─ Type: %s", cfg.Type)
+					confirmedDevices[dev.DeviceID] = dev
+					delete(unfoundDevices, dev.DeviceID)
+					foundCount++
+				}
+			}
+			if foundCount > 0 {
+				t.Logf("    ✓ 广播扫描成功发现 %d 台设备", foundCount)
+			}
+		}
+	}
+
+	discoveryFailures := len(deviceConfigs) - len(confirmedDevices)
 	if discoveryFailures > 0 {
 		t.Fatalf("❌ Phase 1 失败: %d 台设备无法通信", discoveryFailures)
 	}
 	t.Logf("")
-	t.Logf("✅ Phase 1 完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(targetDeviceIDs))
+	t.Logf("✅ Phase 1 完成: %d/%d 设备全部发现成功", len(confirmedDevices), len(deviceConfigs))
 
 	// ─────────────────────────────────────────────────────────────
 	// Phase 2: 设备注册 (构建设备管理表)
@@ -262,7 +263,8 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 
 	deviceRegistry := make(map[int]*DeviceRecord)
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		dev, ok := confirmedDevices[targetID]
 		if !ok {
 			t.Errorf("  ❌ Device %d 未在验证阶段找到", targetID)
@@ -317,7 +319,8 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	scannedDevices := make(map[int]btypes.Device)
 	scanFailures := 0
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [扫描] Device %d ...", targetID)
 
@@ -350,7 +353,7 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 		t.Fatalf("❌ Phase 3 失败: %d 台设备扫描失败", scanFailures)
 	}
 	t.Logf("")
-	t.Logf("✅ Phase 3 完成: %d/%d 设备对象扫描成功", len(scannedDevices), len(targetDeviceIDs))
+	t.Logf("✅ Phase 3 完成: %d/%d 设备对象扫描成功", len(scannedDevices), len(deviceConfigs))
 
 	// ─────────────────────────────────────────────────────────────
 	// Phase 4: 点位注册 (构建点位监控表)
@@ -369,7 +372,8 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 		btypes.AnalogOutput,
 	}
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [注册点位] Device %d ...", targetID)
 
@@ -498,10 +502,10 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	changedCount := 0
 	for _, snapshot := range snapshots {
 		hasChanged := false
-		if snapshot.Round1 != nil && snapshot.Round2 != nil && snapshot.Round1 != snapshot.Round2 {
+		if snapshot.Round1 != nil && snapshot.Round2 != nil && !valuesEqual(snapshot.Round1, snapshot.Round2) {
 			hasChanged = true
 		}
-		if snapshot.Round2 != nil && snapshot.Round3 != nil && snapshot.Round2 != snapshot.Round3 {
+		if snapshot.Round2 != nil && snapshot.Round3 != nil && !valuesEqual(snapshot.Round2, snapshot.Round3) {
 			hasChanged = true
 		}
 		snapshot.HasChanged = hasChanged
@@ -555,7 +559,8 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	totalWriteAttempts := 0
 	totalWriteSuccess := 0
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [写入] Device %d ...", targetID)
 
@@ -710,9 +715,9 @@ func TestBACnetDriverWorkflow(t *testing.T) {
 	t.Logf("")
 	t.Logf("【测试结果】")
 	t.Logf("  ├─ 总耗时: %s", totalElapsed.Round(time.Millisecond))
-	t.Logf("  ├─ Phase 1 设备发现: ✅ %d/%d 成功", len(confirmedDevices), len(targetDeviceIDs))
+	t.Logf("  ├─ Phase 1 设备发现: ✅ %d/%d 成功", len(confirmedDevices), len(deviceConfigs))
 	t.Logf("  ├─ Phase 2 设备注册: ✅ %d 台设备", len(deviceRegistry))
-	t.Logf("  ├─ Phase 3 点位扫描: ✅ %d/%d 成功", len(scannedDevices), len(targetDeviceIDs))
+	t.Logf("  ├─ Phase 3 点位扫描: ✅ %d/%d 成功", len(scannedDevices), len(deviceConfigs))
 	t.Logf("  ├─ Phase 4 点位注册: ✅ %d 个点位", len(pointRegistry))
 	t.Logf("  ├─ Phase 5 实时轮询: ✅ %d 个点位中有 %d 个变化", len(snapshots), changedCount)
 	t.Logf("  └─ Phase 6 可写点写入: ✅ %d/%d 成功", totalWriteSuccess, totalWriteAttempts)

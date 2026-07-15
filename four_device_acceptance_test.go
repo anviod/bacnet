@@ -9,40 +9,37 @@ import (
 	"github.com/anviod/bacnet/datalink"
 )
 
-// TestFourDeviceAcceptance 四设备完整验收测试
-//
-// 设备清单:
-//
-//	Device ID 1234    → room-simulator
-//	Device ID 2228316 → Yabe simulator
-//	Device ID 2228317 → Yabe simulator
-//	Device ID 2228318 → Yabe simulator
-//
-// 测试阶段: 发现 → 扫描 → 全量读取 → 可写点写入
 func TestFourDeviceAcceptance(t *testing.T) {
 	const (
-		targetIP    = "192.168.3.115"
-		readTimeout = 8 * time.Second
-		clientPort  = 47815
+		targetIP      = "192.168.3.115"
+		readTimeout   = 10 * time.Second
+		clientPort    = 47815
+		broadcastPort = 47808
 	)
 
-	// 需要验证的设备ID列表
-	targetDeviceIDs := []int{1234, 2228316, 2228317, 2228318}
+	type DeviceConfig struct {
+		ID   int
+		Port int
+		Type string
+	}
+
+	deviceConfigs := []DeviceConfig{
+		{ID: 1234, Port: 47810, Type: "room-simulator"},
+		{ID: 2228316, Port: 58494, Type: "Yabe simulator"},
+		{ID: 2228317, Port: 64339, Type: "Yabe simulator"},
+		{ID: 2228318, Port: 54304, Type: "Yabe simulator"},
+	}
 
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Log("            四设备 BACnet 完整验收测试")
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Logf("目标 IP: %s, 客户端端口: %d", targetIP, clientPort)
+	t.Logf("预配置设备列表:")
+	for _, cfg := range deviceConfigs {
+		t.Logf("  - DeviceID=%d, Port=%d, Type=%s", cfg.ID, cfg.Port, cfg.Type)
+	}
 
 	startAll := time.Now()
-
-	// ─────────────────────────────────────────────────────────────
-	// Phase 0: 客户端初始化
-	// ─────────────────────────────────────────────────────────────
-	t.Log("")
-	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              Phase 0: 客户端初始化")
-	t.Log("───────────────────────────────────────────────────────────────")
 
 	bacClient, err := NewClient(&ClientBuilder{
 		Ip:         targetIP,
@@ -62,167 +59,109 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	}
 	t.Logf("✓ 客户端运行在端口 %d", clientPort)
 
-	// ─────────────────────────────────────────────────────────────
-	// Phase 1: 设备发现与验证
-	// Step 1a: WhoIs 广播发现设备
-	// Step 1b: 对每个目标设备进行 ReadProperty 验证
-	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              Phase 1: 设备发现与验证")
+	t.Log("              Phase 1: 设备发现与验证 (两步扫描)")
 	t.Log("───────────────────────────────────────────────────────────────")
 
-	t.Logf("")
-	t.Logf("  [WhoIs] 广播发现...")
-	devices, err := bacClient.WhoIs(&WhoIsOpts{Low: 0, High: 4194304})
-	if err != nil {
-		t.Logf("  ⚠ WhoIs 失败: %v", err)
-	} else {
-		t.Logf("  ✓ 发现 %d 台设备 (WhoIs):", len(devices))
-		for _, d := range devices {
-			udpAddr, _ := d.Addr.UDPAddr()
-			t.Logf("    DeviceID=%d, Addr=%s:%d", d.DeviceID, udpAddr.IP, udpAddr.Port)
-		}
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	t.Logf("")
-	t.Logf("  [验证] ReadProperty Object_Name 逐设备验证...")
-
 	confirmedDevices := make(map[int]btypes.Device)
-	discoveryFailures := 0
+	unfoundDevices := make(map[int]DeviceConfig)
 
-	for _, targetID := range targetDeviceIDs {
-		var foundDev *btypes.Device
-		for _, d := range devices {
-			if d.DeviceID == targetID {
-				foundDev = &d
-				break
-			}
+	t.Logf("")
+	t.Logf("  Step 1: 使用用户提供的 ID+IP+Port 进行直接验证...")
+
+	for _, cfg := range deviceConfigs {
+		t.Logf("")
+		t.Logf("    ── Device %d (%s) 直接验证 ──", cfg.ID, cfg.Type)
+
+		addr := datalink.IPPortToAddress(net.ParseIP(targetIP), cfg.Port)
+		testDev := btypes.Device{
+			DeviceID: cfg.ID,
+			Addr:     *addr,
+			Ip:       targetIP,
+			Port:     cfg.Port,
+			MaxApdu:  btypes.MaxAPDU,
+			ID: btypes.ObjectID{
+				Type:     btypes.DeviceType,
+				Instance: btypes.ObjectInstance(cfg.ID),
+			},
 		}
 
-		var dev btypes.Device
-		var found bool
-		if foundDev != nil {
-			dev = *foundDev
-		} else {
-			var portsToTry []int
-			if targetID == 1234 {
-				portsToTry = []int{47808, 47810, 47811, 47812}
-			} else {
-				portsToTry = []int{47808, 50958, 61663, 47810, 47811, 47812, 47809}
-			}
-
-			for _, port := range portsToTry {
-				addr := datalink.IPPortToAddress(net.ParseIP("255.255.255.255"), port)
-				testDev := btypes.Device{
-					DeviceID: targetID,
-					Addr:     *addr,
-					Ip:       targetIP,
-					Port:     port,
-					MaxApdu:  btypes.MaxAPDU,
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-				}
-
-				rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
-					Object: btypes.Object{
-						ID: btypes.ObjectID{
-							Type:     btypes.DeviceType,
-							Instance: btypes.ObjectInstance(targetID),
-						},
-						Properties: []btypes.Property{{
-							Type:       btypes.PropObjectName,
-							ArrayIndex: btypes.ArrayAll,
-						}},
-					},
-				}, 3*time.Second)
-
-				if errTest == nil && len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
-					dev = testDev
-					found = true
-					t.Logf("    ✓ Device %d 在端口 %d 找到", targetID, port)
-					break
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-
-			if !found {
-				addr := datalink.IPPortToAddress(net.ParseIP("255.255.255.255"), 47808)
-				dev = btypes.Device{
-					DeviceID: targetID,
-					Addr:     *addr,
-					Ip:       targetIP,
-					Port:     47808,
-					MaxApdu:  btypes.MaxAPDU,
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-				}
-			}
-		}
-
-		if found {
-			t.Logf("    ✓ Device %d 验证成功", targetID)
-			confirmedDevices[targetID] = dev
-			time.Sleep(1000 * time.Millisecond)
-			continue
-		}
-
-		var rp btypes.PropertyData
-		var err error
-		success := false
-
-		for retry := 0; retry < 10; retry++ {
-			rp, err = bacClient.ReadPropertyWithTimeout(dev, btypes.PropertyData{
-				Object: btypes.Object{
-					ID: btypes.ObjectID{
-						Type:     btypes.DeviceType,
-						Instance: btypes.ObjectInstance(targetID),
-					},
-					Properties: []btypes.Property{{
-						Type:       btypes.PropObjectName,
-						ArrayIndex: btypes.ArrayAll,
-					}},
+		rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
+			Object: btypes.Object{
+				ID: btypes.ObjectID{
+					Type:     btypes.DeviceType,
+					Instance: btypes.ObjectInstance(cfg.ID),
 				},
-			}, readTimeout)
+				Properties: []btypes.Property{{
+					Type:       btypes.PropObjectName,
+					ArrayIndex: btypes.ArrayAll,
+				}},
+			},
+		}, readTimeout)
 
-			if err == nil {
-				success = true
-				break
-			}
-
-			t.Logf("    ⚠ Device %d 重试 %d: %v", targetID, retry+1, err)
-			time.Sleep(2000 * time.Millisecond)
-		}
-
-		if !success {
-			t.Errorf("    ❌ Device %d 验证失败", targetID)
-			discoveryFailures++
-			continue
-		}
-
-		if len(rp.Object.Properties) > 0 && rp.Object.Properties[0].Data != nil {
-			t.Logf("    ✓ Device %d Object_Name=%v", targetID, rp.Object.Properties[0].Data)
+		if errTest != nil {
+			t.Logf("    ⚠ Device %d 直接验证失败: %v", cfg.ID, errTest)
+			t.Logf("      └─ 加入广播扫描队列")
+			unfoundDevices[cfg.ID] = cfg
+		} else if len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
+			t.Logf("    ✓ Device %d (%s) 验证成功", cfg.ID, rpTest.Object.Properties[0].Data)
+			t.Logf("      ├─ IP: %s", targetIP)
+			t.Logf("      ├─ Port: %d", cfg.Port)
+			t.Logf("      └─ Type: %s", cfg.Type)
+			confirmedDevices[cfg.ID] = testDev
 		} else {
-			t.Logf("    ✓ Device %d 响应正常", targetID)
+			t.Logf("    ✓ Device %d 验证成功 (无名称)", cfg.ID)
+			t.Logf("      ├─ IP: %s", targetIP)
+			t.Logf("      ├─ Port: %d", cfg.Port)
+			t.Logf("      └─ Type: %s", cfg.Type)
+			confirmedDevices[cfg.ID] = testDev
 		}
-		confirmedDevices[targetID] = dev
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 
+	if len(unfoundDevices) > 0 {
+		t.Logf("")
+		t.Logf("  Step 2: 对未发现的设备使用广播方式扫描 (端口 %d)...", broadcastPort)
+
+		broadcastAddr := datalink.IPPortToAddress(net.ParseIP(targetIP), broadcastPort)
+		whoIsOpts := &WhoIsOpts{
+			Low:             0,
+			High:            4194304,
+			Destination:     broadcastAddr,
+			GlobalBroadcast: false,
+		}
+
+		devices, err := bacClient.WhoIs(whoIsOpts)
+		if err != nil {
+			t.Logf("    ⚠ 广播扫描失败: %v", err)
+		} else {
+			foundCount := 0
+			for _, dev := range devices {
+				t.Logf("    ✉️ 收到 I-Am: DeviceID=%d, IP=%s:%d", dev.DeviceID, dev.Ip, dev.Port)
+				if cfg, ok := unfoundDevices[dev.DeviceID]; ok {
+					t.Logf("    ✓ Device %d 通过广播发现", dev.DeviceID)
+					t.Logf("      ├─ IP: %s", dev.Ip)
+					t.Logf("      ├─ Port: %d", dev.Port)
+					t.Logf("      └─ Type: %s", cfg.Type)
+					confirmedDevices[dev.DeviceID] = dev
+					delete(unfoundDevices, dev.DeviceID)
+					foundCount++
+				}
+			}
+			if foundCount > 0 {
+				t.Logf("    ✓ 广播扫描成功发现 %d 台设备", foundCount)
+			}
+		}
+	}
+
+	discoveryFailures := len(deviceConfigs) - len(confirmedDevices)
 	if discoveryFailures > 0 {
 		t.Fatalf("❌ Phase 1 失败: %d 台设备无法通信", discoveryFailures)
 	}
 	t.Logf("")
-	t.Logf("✅ Phase 1 完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(targetDeviceIDs))
+	t.Logf("✅ Phase 1 完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(deviceConfigs))
 
-	// ─────────────────────────────────────────────────────────────
-	// Phase 2: 对象扫描 (Objects)
-	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
 	t.Log("              Phase 2: 对象扫描 (Objects)")
@@ -231,7 +170,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	scannedDevices := make(map[int]btypes.Device)
 	scanFailures := 0
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [扫描] Device %d ...", targetID)
 
@@ -264,11 +204,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 		t.Fatalf("❌ Phase 2 失败: %d 台设备扫描失败", scanFailures)
 	}
 	t.Logf("")
-	t.Logf("✅ Phase 2 完成: %d/%d 设备对象扫描成功", len(scannedDevices), len(targetDeviceIDs))
+	t.Logf("✅ Phase 2 完成: %d/%d 设备对象扫描成功", len(scannedDevices), len(deviceConfigs))
 
-	// ─────────────────────────────────────────────────────────────
-	// Phase 3: 全量读取 Present_Value
-	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
 	t.Log("           Phase 3: 全量读取 Present_Value")
@@ -278,7 +215,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	totalReadPoints := 0
 	totalReadSuccess := 0
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [读取] Device %d ...", targetID)
 
@@ -331,9 +269,6 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	t.Logf("")
 	t.Logf("✅ Phase 3 完成: %d/%d 点位读取成功", totalReadSuccess, totalReadPoints)
 
-	// ─────────────────────────────────────────────────────────────
-	// Phase 4: 可写点写入测试
-	// ─────────────────────────────────────────────────────────────
 	t.Log("")
 	t.Log("───────────────────────────────────────────────────────────────")
 	t.Log("           Phase 4: 可写点写入测试 (WriteProperty)")
@@ -350,7 +285,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	totalWriteAttempts := 0
 	totalWriteSuccess := 0
 
-	for _, targetID := range targetDeviceIDs {
+	for _, cfg := range deviceConfigs {
+		targetID := cfg.ID
 		t.Logf("")
 		t.Logf("  [写入] Device %d ...", targetID)
 
@@ -440,9 +376,6 @@ func TestFourDeviceAcceptance(t *testing.T) {
 		t.Fatalf("❌ Phase 4 失败: %d 次写入失败", writeFailures)
 	}
 
-	// ─────────────────────────────────────────────────────────────
-	// 汇总
-	// ─────────────────────────────────────────────────────────────
 	totalElapsed := time.Since(startAll)
 	t.Log("")
 	t.Log("═══════════════════════════════════════════════════════════════")
@@ -451,8 +384,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	t.Logf("")
 	t.Logf("【测试结果】")
 	t.Logf("  ├─ 总耗时: %s", totalElapsed.Round(time.Millisecond))
-	t.Logf("  ├─ Phase 1 设备发现: ✅ %d/%d 成功", len(confirmedDevices), len(targetDeviceIDs))
-	t.Logf("  ├─ Phase 2 对象扫描: ✅ %d/%d 成功", len(scannedDevices), len(targetDeviceIDs))
+	t.Logf("  ├─ Phase 1 设备发现: ✅ %d/%d 成功", len(confirmedDevices), len(deviceConfigs))
+	t.Logf("  ├─ Phase 2 对象扫描: ✅ %d/%d 成功", len(scannedDevices), len(deviceConfigs))
 	t.Logf("  ├─ Phase 3 点位读取: ✅ %d/%d 成功", totalReadSuccess, totalReadPoints)
 	t.Logf("  └─ Phase 4 可写点写入: ✅ %d/%d 成功", totalWriteSuccess, totalWriteAttempts)
 	t.Logf("")

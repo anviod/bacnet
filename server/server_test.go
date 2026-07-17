@@ -220,6 +220,312 @@ func TestServer_handleReadMultiProperty(t *testing.T) {
 	}
 }
 
+// TestServer_ReadMultiProperty_Local 测试 Server 本地批量读功能。
+// 验证 ReadMultiProperty 可以像 Client.ReadMultiProperty 一样批量读取多对象多属性，
+// 但直接查询本地 ObjectStore 而不走 BACnet 网络协议。
+func TestServer_ReadMultiProperty_Local(t *testing.T) {
+	cfg := DefaultDeviceConfig()
+	cfg.DeviceID = 1000
+	cfg.DeviceName = "BatchReadServer"
+
+	dl := newMockDataLink()
+	srv, err := NewServerWithDataLink(cfg, dl)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// 造数据：添加 AnalogInput (AI-1), BinaryOutput (BO-1), MultiStateValue (MSV-1).
+	_ = srv.AddObject(btypes.Object{
+		ID: btypes.ObjectID{
+			Type:     btypes.AnalogInput,
+			Instance: 1,
+		},
+		Properties: []btypes.Property{
+			{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: float64(25.5)},
+			{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll, Data: "Temperature"},
+			{Type: btypes.PROP_DESCRIPTION, ArrayIndex: btypes.ArrayAll, Data: "Room temp"},
+		},
+	})
+	_ = srv.AddObject(btypes.Object{
+		ID: btypes.ObjectID{
+			Type:     btypes.BinaryOutput,
+			Instance: 1,
+		},
+		Properties: []btypes.Property{
+			{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: uint32(1)},
+			{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll, Data: "Fan"},
+		},
+	})
+	_ = srv.AddObject(btypes.Object{
+		ID: btypes.ObjectID{
+			Type:     btypes.MultiStateValue,
+			Instance: 1,
+		},
+		Properties: []btypes.Property{
+			{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll, Data: uint32(3)},
+			{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll, Data: "Mode"},
+		},
+	})
+
+	// --- 测试 1: 多对象多属性批量读取 ---
+	t.Run("MultiObjectMultiProperty", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+					Properties: []btypes.Property{
+						{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+						{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll},
+					},
+				},
+				{
+					ID: btypes.ObjectID{Type: btypes.BinaryOutput, Instance: 1},
+					Properties: []btypes.Property{
+						{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+					},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+		if len(resp.Objects) != 2 {
+			t.Fatalf("expected 2 objects, got %d", len(resp.Objects))
+		}
+
+		// AI-1: PresentValue 应为 float32(25.5), ObjectName 应为 "Temperature"
+		ai := resp.Objects[0]
+		if len(ai.Properties) != 2 {
+			t.Fatalf("AI-1: expected 2 properties, got %d", len(ai.Properties))
+		}
+		if pv, ok := ai.Properties[0].Data.(float32); !ok || pv != 25.5 {
+			t.Errorf("AI-1 PresentValue: expected float32(25.5), got %T(%v)", ai.Properties[0].Data, ai.Properties[0].Data)
+		}
+		if name, ok := ai.Properties[1].Data.(string); !ok || name != "Temperature" {
+			t.Errorf("AI-1 ObjectName: expected 'Temperature', got %v", ai.Properties[1].Data)
+		}
+
+		// BO-1: PresentValue 应为 Enumerated(1)
+		bo := resp.Objects[1]
+		if len(bo.Properties) != 1 {
+			t.Fatalf("BO-1: expected 1 property, got %d", len(bo.Properties))
+		}
+		if pv, ok := bo.Properties[0].Data.(btypes.Enumerated); !ok || uint32(pv) != 1 {
+			t.Errorf("BO-1 PresentValue: expected Enumerated(1), got %T(%v)", bo.Properties[0].Data, bo.Properties[0].Data)
+		}
+	})
+
+	// --- 测试 2: PresentValue 类型规范化 (Binary→Enumerated, Analog→float32) ---
+	t.Run("PresentValueNormalization", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID:         btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+					Properties: []btypes.Property{{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll}},
+				},
+				{
+					ID:         btypes.ObjectID{Type: btypes.BinaryOutput, Instance: 1},
+					Properties: []btypes.Property{{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll}},
+				},
+				{
+					ID:         btypes.ObjectID{Type: btypes.MultiStateValue, Instance: 1},
+					Properties: []btypes.Property{{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll}},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+
+		// AnalogInput: float64 → float32
+		if _, ok := resp.Objects[0].Properties[0].Data.(float32); !ok {
+			t.Errorf("AI PresentValue: expected float32, got %T", resp.Objects[0].Properties[0].Data)
+		}
+		// BinaryOutput: uint32 → Enumerated
+		if _, ok := resp.Objects[1].Properties[0].Data.(btypes.Enumerated); !ok {
+			t.Errorf("BO PresentValue: expected Enumerated, got %T", resp.Objects[1].Properties[0].Data)
+		}
+		// MultiStateValue: uint32 → uint32 (unchanged)
+		if pv, ok := resp.Objects[2].Properties[0].Data.(uint32); !ok || pv != 3 {
+			t.Errorf("MSV PresentValue: expected uint32(3), got %T(%v)", resp.Objects[2].Properties[0].Data, resp.Objects[2].Properties[0].Data)
+		}
+	})
+
+	// --- 测试 3: Device 对象 PROP_ALL 展开 ---
+	t.Run("DevicePropAllExpansion", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID:         btypes.ObjectID{Type: btypes.DeviceType, Instance: 1000},
+					Properties: []btypes.Property{{Type: btypes.PROP_ALL, ArrayIndex: btypes.ArrayAll}},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+		if len(resp.Objects) != 1 {
+			t.Fatalf("expected 1 object, got %d", len(resp.Objects))
+		}
+		// PROP_ALL should expand to many device properties (>= 10)
+		if len(resp.Objects[0].Properties) < 10 {
+			t.Errorf("Device PROP_ALL: expected >= 10 properties, got %d", len(resp.Objects[0].Properties))
+		}
+
+		// Verify key properties exist in the expanded list
+		propMap := make(map[btypes.PropertyType]interface{})
+		for _, p := range resp.Objects[0].Properties {
+			propMap[p.Type] = p.Data
+		}
+		if _, ok := propMap[btypes.PROP_OBJECT_NAME]; !ok {
+			t.Error("Device PROP_ALL: missing OBJECT_NAME")
+		}
+		if _, ok := propMap[btypes.PROP_VENDOR_IDENTIFIER]; !ok {
+			t.Error("Device PROP_ALL: missing VENDOR_IDENTIFIER")
+		}
+		if _, ok := propMap[btypes.PROP_MODEL_NAME]; !ok {
+			t.Error("Device PROP_ALL: missing MODEL_NAME")
+		}
+	})
+
+	// --- 测试 4: 混合请求（Device PROP_ALL + 普通对象属性） ---
+	t.Run("MixedDeviceAndNormalObjects", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID:         btypes.ObjectID{Type: btypes.DeviceType, Instance: 1000},
+					Properties: []btypes.Property{{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll}},
+				},
+				{
+					ID:         btypes.ObjectID{Type: btypes.MultiStateValue, Instance: 1},
+					Properties: []btypes.Property{{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll}},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+		if len(resp.Objects) != 2 {
+			t.Fatalf("expected 2 objects, got %d", len(resp.Objects))
+		}
+		// Device object -> ObjectName
+		if name, ok := resp.Objects[0].Properties[0].Data.(string); !ok || name != "BatchReadServer" {
+			t.Errorf("Device ObjectName: expected 'BatchReadServer', got %v", resp.Objects[0].Properties[0].Data)
+		}
+		// MSV -> PresentValue
+		if pv, ok := resp.Objects[1].Properties[0].Data.(uint32); !ok || pv != 3 {
+			t.Errorf("MSV PresentValue: expected uint32(3), got %T(%v)", resp.Objects[1].Properties[0].Data, resp.Objects[1].Properties[0].Data)
+		}
+	})
+
+	// --- 测试 5: 请求不存在的对象 — 静默跳过，不报错 ---
+	t.Run("UnknownObjectSilentSkip", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID:         btypes.ObjectID{Type: btypes.AnalogInput, Instance: 999},
+					Properties: []btypes.Property{{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll}},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty should not error on unknown object: %v", err)
+		}
+		if len(resp.Objects) != 1 {
+			t.Fatalf("expected 1 object in response, got %d", len(resp.Objects))
+		}
+		// Unknown object returns empty properties
+		if len(resp.Objects[0].Properties) != 0 {
+			t.Errorf("unknown object should return empty properties, got %d", len(resp.Objects[0].Properties))
+		}
+	})
+
+	// --- 测试 6: 请求不存在的属性 — 静默跳过 ---
+	t.Run("UnknownPropertySilentSkip", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+					Properties: []btypes.Property{
+						{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+						{Type: btypes.PROP_COV_INCREMENT, ArrayIndex: btypes.ArrayAll}, // 未设置，应跳过
+					},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+		// 只有 PresentValue 返回，COVIncrement 跳过
+		if len(resp.Objects[0].Properties) != 1 {
+			t.Errorf("expected 1 property (only PresentValue), got %d", len(resp.Objects[0].Properties))
+		}
+		if resp.Objects[0].Properties[0].Type != btypes.PROP_PRESENT_VALUE {
+			t.Errorf("expected PresentValue, got %v", resp.Objects[0].Properties[0].Type)
+		}
+	})
+
+	// --- 测试 7: 空请求 ---
+	t.Run("EmptyRequest", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty empty request: %v", err)
+		}
+		if len(resp.Objects) != 0 {
+			t.Errorf("empty request should return empty response, got %d objects", len(resp.Objects))
+		}
+	})
+
+	// --- 测试 8: 单对象多属性（含 ObjectName + Description） ---
+	t.Run("SingleObjectMultiProperty", func(t *testing.T) {
+		req := btypes.MultiplePropertyData{
+			Objects: []btypes.Object{
+				{
+					ID: btypes.ObjectID{Type: btypes.AnalogInput, Instance: 1},
+					Properties: []btypes.Property{
+						{Type: btypes.PROP_PRESENT_VALUE, ArrayIndex: btypes.ArrayAll},
+						{Type: btypes.PROP_OBJECT_NAME, ArrayIndex: btypes.ArrayAll},
+						{Type: btypes.PROP_DESCRIPTION, ArrayIndex: btypes.ArrayAll},
+					},
+				},
+			},
+		}
+
+		resp, err := srv.ReadMultiProperty(req)
+		if err != nil {
+			t.Fatalf("ReadMultiProperty failed: %v", err)
+		}
+		if len(resp.Objects[0].Properties) != 3 {
+			t.Fatalf("expected 3 properties, got %d", len(resp.Objects[0].Properties))
+		}
+		if pv, ok := resp.Objects[0].Properties[0].Data.(float32); !ok || pv != 25.5 {
+			t.Errorf("PresentValue: expected float32(25.5), got %T(%v)", resp.Objects[0].Properties[0].Data, resp.Objects[0].Properties[0].Data)
+		}
+		if name, ok := resp.Objects[0].Properties[1].Data.(string); !ok || name != "Temperature" {
+			t.Errorf("ObjectName: expected 'Temperature', got %v", resp.Objects[0].Properties[1].Data)
+		}
+		if desc, ok := resp.Objects[0].Properties[2].Data.(string); !ok || desc != "Room temp" {
+			t.Errorf("Description: expected 'Room temp', got %v", resp.Objects[0].Properties[2].Data)
+		}
+	})
+}
+
 func TestServer_handleWriteMultiProperty(t *testing.T) {
 	store := NewObjectStore(1000, "TestDevice", 999)
 

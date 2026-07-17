@@ -63,6 +63,19 @@ type Server interface {
 	// GetProperty 从对象中检索特定属性值。
 	GetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType) (interface{}, bool)
 
+	// ReadMultiProperty reads multiple properties from multiple objects in the local
+	// object store. This is the server-side counterpart of Client.ReadMultiProperty —
+	// instead of sending a BACnet ReadPropertyMultiple request over the network, it
+	// directly queries the local ObjectStore. PROP_ALL/REQUIRED/OPTIONAL on Device
+	// objects are automatically expanded to concrete properties. PresentValue is
+	// normalized (Binary→Enumerated, Analog→float32) to match wire-format expectations.
+	//
+	// ReadMultiProperty 从本地对象存储中批量读取多个对象的多个属性。
+	// 这是 Client.ReadMultiProperty 的服务端逆向对应——不走 BACnet 网络请求，
+	// 直接查询本地 ObjectStore。Device 对象的 PROP_ALL/REQUIRED/OPTIONAL
+	// 会自动展开为具体属性，PresentValue 会做规范化处理。
+	ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.MultiplePropertyData, error)
+
 	// GetObjectStore returns the underlying object store for direct access.
 	// GetObjectStore 返回底层对象存储以供直接访问。
 	GetObjectStore() *ObjectStore
@@ -301,6 +314,61 @@ func (s *server) SetProperty(objType btypes.ObjectType, instance btypes.ObjectIn
 // GetProperty retrieves a property from an object.
 func (s *server) GetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType) (interface{}, bool) {
 	return s.store.GetProperty(objType, instance, propType)
+}
+
+// ReadMultiProperty reads multiple properties from multiple objects in the local
+// object store. This is the server-side counterpart of Client.ReadMultiProperty —
+// instead of sending a BACnet ReadPropertyMultiple request over the network, it
+// directly queries the local ObjectStore.
+//
+// ReadMultiProperty 从本地对象存储中批量读取多个对象的多个属性。
+// 这是 Client.ReadMultiProperty 的服务端逆向对应——不走 BACnet 网络请求，
+// 直接查询本地 ObjectStore。
+func (s *server) ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.MultiplePropertyData, error) {
+	response := btypes.MultiplePropertyData{
+		Objects: make([]btypes.Object, 0),
+	}
+
+	for _, reqObj := range data.Objects {
+		objType := reqObj.ID.Type
+		objInstance := reqObj.ID.Instance
+
+		respObj := btypes.Object{
+			ID: btypes.ObjectID{
+				Type:     objType,
+				Instance: objInstance,
+			},
+			Properties: make([]btypes.Property, 0),
+		}
+
+		for _, reqProp := range reqObj.Properties {
+			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
+			if objType == btypes.DeviceType &&
+				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
+				if !s.store.DevicePropertyExists(objInstance) {
+					continue
+				}
+				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+				continue
+			}
+
+			value, found := s.store.GetPropertyAt(objType, objInstance, reqProp.Type, reqProp.ArrayIndex)
+			if found {
+				if reqProp.Type == btypes.PROP_PRESENT_VALUE {
+					value = normalizePresentValue(objType, value)
+				}
+				respObj.Properties = append(respObj.Properties, btypes.Property{
+					Type:       reqProp.Type,
+					ArrayIndex: reqProp.ArrayIndex,
+					Data:       value,
+				})
+			}
+		}
+
+		response.Objects = append(response.Objects, respObj)
+	}
+
+	return response, nil
 }
 
 // GetObjectStore returns the underlying object store.

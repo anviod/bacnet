@@ -5,14 +5,19 @@ package datalink
 import "syscall"
 
 // setReuseUDP enables SO_REUSEADDR so the simulator can coexist with YABE on the
-// same machine. When room-simulator is bound to a specific IP (e.g. 192.168.3.115)
-// and YABE is bound to 0.0.0.0:47808, Windows delivers unicast ReadProperty
-// requests addressed to that specific IP to the room-simulator socket, while
-// broadcast Who-Is messages are received by both applications.
+// same machine. It also enables SO_BROADCAST because Windows requires explicit
+// broadcast permission on UDP sockets — without it, sending WhoIs broadcast
+// packets silently fails and no BACnet devices are discovered.
+// 同时启用 SO_BROADCAST，因为 Windows 要求 UDP 套接字显式允许广播 —
+// 不设置此选项会导致 WhoIs 广播包静默失败，无法发现 BACnet 设备。
 func setReuseUDP(network, address string, c syscall.RawConn) error {
 	var opErr error
 	err := c.Control(func(fd uintptr) {
 		opErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		if opErr != nil {
+			return
+		}
+		opErr = syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
 	})
 	if err != nil {
 		return err

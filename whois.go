@@ -134,12 +134,10 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 			Vendor:       iam.Vendor,
 		}
 
-		// Some BACnet/IP stacks send I-Am from an ephemeral UDP source port while
-		// still accepting confirmed services on the configured BACnet/IP port.
 		// When the caller used a unicast Who-Is destination, keep that address as
-		// the confirmed-service destination instead of blindly copying the I-Am
-		// packet source address.
-		if wh.Destination != nil && !wh.Destination.IsBroadcast() {
+		// the confirmed-service destination. For broadcast destinations, use the
+		// I-Am packet source address.
+		if wh.Destination != nil && !isBroadcastDest(wh.Destination) {
 			dev.Addr = *wh.Destination
 		}
 		if udpAddr, err := dev.Addr.UDPAddr(); err == nil {
@@ -151,4 +149,32 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 		uniqueList = append(uniqueList, dev)
 	}
 	return uniqueList, err
+}
+
+// isBroadcastDest detects whether a BACnet address is a broadcast destination.
+// It covers three cases:
+//   1. MacLen==0 (subnet-directed broadcast, as set by GetBroadcastAddress)
+//   2. Net==0xFFFF (global broadcast)
+//   3. IP-based subnet broadcast (e.g. 192.168.3.255) when MacLen!=0
+//      (created by datalink.IPPortToAddress without SetBroadcast)
+// 检测 BACnet 地址是否为广播目标，覆盖三种情况：
+//   1. MacLen==0（子网广播，由 GetBroadcastAddress 设置）
+//   2. Net==0xFFFF（全局广播）
+//   3. 基于 IP 的子网广播（如 192.168.3.255），MacLen!=0 时
+//      （由 datalink.IPPortToAddress 创建但未调用 SetBroadcast）
+func isBroadcastDest(dest *btypes.Address) bool {
+	if dest == nil {
+		return false
+	}
+	if dest.IsBroadcast() || dest.IsSubBroadcast() {
+		return true
+	}
+	// Also check IP-based subnet broadcast when MacLen != 0
+	if udpAddr, err := dest.UDPAddr(); err == nil {
+		ip4 := udpAddr.IP.To4()
+		if ip4 != nil && ip4[3] == 255 {
+			return true
+		}
+	}
+	return false
 }

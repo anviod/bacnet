@@ -390,7 +390,7 @@ func (c *client) Send(dest btypes.Address, npdu *btypes.NPDU, data []byte, broad
 	// 	header.Function = btypes.BacFuncUnicast
 	// } else
 
-	if dest.IsBroadcast() || dest.IsSubBroadcast() {
+	if dest.IsBroadcast() || dest.IsSubBroadcast() || isBroadcastDest(&dest) {
 		// SET BROADCAST FLAG
 		header.Function = btypes.BacFuncBroadcast
 	} else {

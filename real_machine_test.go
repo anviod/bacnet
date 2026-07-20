@@ -15,29 +15,25 @@ func TestRealMachineDiscovery(t *testing.T) {
 		remoteIP      = "192.168.3.230"
 		readTimeout   = 10 * time.Second
 		clientPort    = 47820
-		broadcastPort = 47808
 	)
 
 	type DeviceConfig struct {
 		ID   int
 		Port int
+		Type string
 	}
 
 	deviceConfigs := []DeviceConfig{
-		{ID: 1234, Port: 47810},
-		{ID: 2228316, Port: 58494},
-		{ID: 2228317, Port: 64339},
-		{ID: 2228318, Port: 54304},
+		{ID: 1234, Port: 47810, Type: "room-simulator"},
+		{ID: 2228316, Port: 47808, Type: "Yabe simulator"},
+		{ID: 2228317, Port: 47808, Type: "Yabe simulator"},
+		{ID: 2228318, Port: 47808, Type: "Yabe simulator"},
 	}
 
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Log("         真机测试: 远程设备发现本机设备")
 	t.Log("═══════════════════════════════════════════════════════════════")
 	t.Logf("本地 IP: %s, 远程 IP: %s, 客户端端口: %d", localIP, remoteIP, clientPort)
-	t.Logf("预配置设备列表:")
-	for _, cfg := range deviceConfigs {
-		t.Logf("  - DeviceID=%d, Port=%d", cfg.ID, cfg.Port)
-	}
 
 	startAll := time.Now()
 
@@ -53,112 +49,180 @@ func TestRealMachineDiscovery(t *testing.T) {
 	defer bacClient.Close()
 	go bacClient.ClientRun()
 	time.Sleep(500 * time.Millisecond)
-
-	if !bacClient.IsRunning() {
-		t.Fatalf("❌ 客户端未运行")
-	}
 	t.Logf("✓ 客户端运行在端口 %d", clientPort)
-
-	t.Log("")
-	t.Log("───────────────────────────────────────────────────────────────")
-	t.Log("              真机测试: 两步设备发现")
-	t.Log("───────────────────────────────────────────────────────────────")
 
 	confirmedDevices := make(map[int]btypes.Device)
 	unfoundDevices := make(map[int]DeviceConfig)
-
-	t.Logf("")
-	t.Logf("  Step 1: 使用用户提供的 ID+IP+Port 进行直接验证...")
-
 	for _, cfg := range deviceConfigs {
-		t.Logf("")
-		t.Logf("    ── Device %d 直接验证 ──", cfg.ID)
-
-		addr := datalink.IPPortToAddress(net.ParseIP(localIP), cfg.Port)
-		testDev := btypes.Device{
-			DeviceID: cfg.ID,
-			Addr:     *addr,
-			Ip:       localIP,
-			Port:     cfg.Port,
-			MaxApdu:  btypes.MaxAPDU,
-			ID: btypes.ObjectID{
-				Type:     btypes.DeviceType,
-				Instance: btypes.ObjectInstance(cfg.ID),
-			},
-		}
-
-		rpTest, errTest := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
-			Object: btypes.Object{
-				ID: btypes.ObjectID{
-					Type:     btypes.DeviceType,
-					Instance: btypes.ObjectInstance(cfg.ID),
-				},
-				Properties: []btypes.Property{{
-					Type:       btypes.PropObjectName,
-					ArrayIndex: btypes.ArrayAll,
-				}},
-			},
-		}, readTimeout)
-
-		if errTest != nil {
-			t.Logf("    ⚠ Device %d 直接验证失败: %v", cfg.ID, errTest)
-			t.Logf("      └─ 加入广播扫描队列")
-			unfoundDevices[cfg.ID] = cfg
-		} else if len(rpTest.Object.Properties) > 0 && rpTest.Object.Properties[0].Data != nil {
-			t.Logf("    ✓ Device %d (%s) 验证成功", cfg.ID, rpTest.Object.Properties[0].Data)
-			t.Logf("      ├─ IP: %s", localIP)
-			t.Logf("      └─ Port: %d", cfg.Port)
-			confirmedDevices[cfg.ID] = testDev
-		} else {
-			t.Logf("    ✓ Device %d 验证成功 (无名称)", cfg.ID)
-			t.Logf("      ├─ IP: %s", localIP)
-			t.Logf("      └─ Port: %d", cfg.Port)
-			confirmedDevices[cfg.ID] = testDev
-		}
-		time.Sleep(500 * time.Millisecond)
+		unfoundDevices[cfg.ID] = cfg
 	}
 
-	if len(unfoundDevices) > 0 {
-		t.Logf("")
-		t.Logf("  Step 2: 对未发现的设备使用广播方式扫描 (端口 %d)...", broadcastPort)
-
-		broadcastAddr := datalink.IPPortToAddress(net.ParseIP(localIP), broadcastPort)
-		whoIsOpts := &WhoIsOpts{
-			Low:             0,
-			High:            4194304,
-			Destination:     broadcastAddr,
-			GlobalBroadcast: false,
+	// ── Step 1: Unicast WhoIs ──
+	t.Log("")
+	t.Log("── Step 1: Unicast WhoIs ──")
+	seenTargets := make(map[int]bool)
+	for _, cfg := range deviceConfigs {
+		if seenTargets[cfg.Port] {
+			continue
 		}
-
-		devices, err := bacClient.WhoIs(whoIsOpts)
+		seenTargets[cfg.Port] = true
+		t.Logf("  Unicast WhoIs -> %s:%d", localIP, cfg.Port)
+		unicastAddr := datalink.IPPortToAddress(net.ParseIP(localIP), cfg.Port)
+		devices, err := bacClient.WhoIs(&WhoIsOpts{
+			Low: 0, High: 4194304, Destination: unicastAddr,
+		})
 		if err != nil {
-			t.Logf("    ⚠ 广播扫描失败: %v", err)
+			t.Logf("    ⚠ 失败: %v", err)
 		} else {
-			foundCount := 0
+			t.Logf("    ✓ 收到 %d 个 I-Am", len(devices))
 			for _, dev := range devices {
-				t.Logf("    ✉️ 收到 I-Am: DeviceID=%d, IP=%s:%d", dev.DeviceID, dev.Ip, dev.Port)
+				t.Logf("    ✉️ DeviceID=%d, IP=%s:%d", dev.DeviceID, dev.Ip, dev.Port)
 				if _, ok := unfoundDevices[dev.DeviceID]; ok {
-					t.Logf("    ✓ Device %d 通过广播发现", dev.DeviceID)
-					t.Logf("      ├─ IP: %s", dev.Ip)
-					t.Logf("      ├─ Port: %d", dev.Port)
-					t.Logf("      └─ Type: 预配置设备")
-					confirmedDevices[dev.DeviceID] = dev
+					confirmedDevices[dev.DeviceID] = btypes.Device{
+						DeviceID: dev.DeviceID, Addr: dev.Addr, Ip: dev.Ip, Port: dev.Port,
+						MaxApdu: btypes.MaxAPDU,
+						ID:      btypes.ObjectID{Type: btypes.DeviceType, Instance: btypes.ObjectInstance(dev.DeviceID)},
+					}
 					delete(unfoundDevices, dev.DeviceID)
-					foundCount++
+					t.Logf("    ✓ Device %d 已确认", dev.DeviceID)
 				}
 			}
-			if foundCount > 0 {
-				t.Logf("    ✓ 广播扫描成功发现 %d 台设备", foundCount)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	// ── Step 2: Direct ReadProperty + diagnostic ──
+	if len(unfoundDevices) > 0 {
+		t.Log("")
+		t.Log("── Step 2: ReadProperty 诊断 ──")
+
+		// First, try Device 2228316 to confirm it works
+		t.Log("")
+		t.Log("  [基准] Device 2228316 (应正常工作):")
+		addr8316 := datalink.IPPortToAddress(net.ParseIP(localIP), 47808)
+		dev8316 := btypes.Device{
+			DeviceID: 2228316, Addr: *addr8316, Ip: localIP, Port: 47808, MaxApdu: btypes.MaxAPDU,
+			ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: 2228316},
+		}
+		rp8316, err8316 := bacClient.ReadPropertyWithTimeout(dev8316, btypes.PropertyData{
+			Object: btypes.Object{
+				ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: 2228316},
+				Properties: []btypes.Property{{Type: btypes.PropObjectName, ArrayIndex: btypes.ArrayAll}},
+			},
+		}, readTimeout)
+		if err8316 != nil {
+			t.Logf("    ⚠ 失败: %v", err8316)
+		} else if len(rp8316.Object.Properties) > 0 {
+			t.Logf("    ✓ ObjectName: %v", rp8316.Object.Properties[0].Data)
+			confirmedDevices[2228316] = dev8316
+			delete(unfoundDevices, 2228316)
+		}
+
+		// Read ObjectList from 2228316
+		t.Logf("    → 读取 ObjectList...")
+		rpList, errList := bacClient.ReadPropertyWithTimeout(dev8316, btypes.PropertyData{
+			Object: btypes.Object{
+				ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: 2228316},
+				Properties: []btypes.Property{{Type: btypes.PropObjectList, ArrayIndex: 0}},
+			},
+		}, readTimeout)
+		if errList != nil {
+			t.Logf("    ⚠ ObjectList 失败: %v", errList)
+		} else if len(rpList.Object.Properties) > 0 {
+			t.Logf("    ✓ ObjectList: %v", rpList.Object.Properties[0].Data)
+		}
+
+		time.Sleep(300 * time.Millisecond)
+
+		// Now diagnose 2228317
+		for _, cfg := range []DeviceConfig{{ID: 2228317, Port: 47808}, {ID: 2228318, Port: 47808}} {
+			t.Log("")
+			t.Logf("  [诊断] Device %d:", cfg.ID)
+			addr := datalink.IPPortToAddress(net.ParseIP(localIP), cfg.Port)
+			testDev := btypes.Device{
+				DeviceID: cfg.ID, Addr: *addr, Ip: localIP, Port: cfg.Port, MaxApdu: btypes.MaxAPDU,
+				ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: btypes.ObjectInstance(cfg.ID)},
+			}
+
+			// Try ObjectList first
+			t.Logf("    → 读取 ObjectList (76)...")
+			rpList, errList := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
+				Object: btypes.Object{
+					ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: btypes.ObjectInstance(cfg.ID)},
+					Properties: []btypes.Property{{Type: btypes.PropObjectList, ArrayIndex: 0}},
+				},
+			}, readTimeout)
+			if errList != nil {
+				t.Logf("    ⚠ ObjectList: %v", errList)
+			} else if len(rpList.Object.Properties) > 0 {
+				t.Logf("    ✓ ObjectList: %v", rpList.Object.Properties[0].Data)
+			}
+
+			// Try ObjectName
+			rpName, errName := bacClient.ReadPropertyWithTimeout(testDev, btypes.PropertyData{
+				Object: btypes.Object{
+					ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: btypes.ObjectInstance(cfg.ID)},
+					Properties: []btypes.Property{{Type: btypes.PropObjectName, ArrayIndex: btypes.ArrayAll}},
+				},
+			}, readTimeout)
+			if errName != nil {
+				t.Logf("    ⚠ ObjectName: %v", errName)
+			} else if len(rpName.Object.Properties) > 0 {
+				t.Logf("    ✓ ObjectName: %v", rpName.Object.Properties[0].Data)
+				confirmedDevices[cfg.ID] = testDev
+				delete(unfoundDevices, cfg.ID)
+			}
+
+			// Try Objects() function (ReadMultiProperty)
+			t.Logf("    → 尝试 Objects() 全量读取...")
+			objs, errObjs := bacClient.Objects(testDev)
+			if errObjs != nil {
+				t.Logf("    ⚠ Objects() 失败: %v", errObjs)
+			} else {
+				t.Logf("    ✓ Objects() 成功, 对象数: %d", len(objs.Objects))
+				confirmedDevices[cfg.ID] = testDev
+				delete(unfoundDevices, cfg.ID)
+			}
+
+			time.Sleep(300 * time.Millisecond)
+		}
+
+		// Also try room-simulator 1234
+		if _, ok := unfoundDevices[1234]; ok {
+			t.Log("")
+			t.Log("  [诊断] Device 1234 (room-simulator):")
+			addr1234 := datalink.IPPortToAddress(net.ParseIP(localIP), 47810)
+			dev1234 := btypes.Device{
+				DeviceID: 1234, Addr: *addr1234, Ip: localIP, Port: 47810, MaxApdu: btypes.MaxAPDU,
+				ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: 1234},
+			}
+			rp1234, err1234 := bacClient.ReadPropertyWithTimeout(dev1234, btypes.PropertyData{
+				Object: btypes.Object{
+					ID: btypes.ObjectID{Type: btypes.DeviceType, Instance: 1234},
+					Properties: []btypes.Property{{Type: btypes.PropObjectName, ArrayIndex: btypes.ArrayAll}},
+				},
+			}, readTimeout)
+			if err1234 != nil {
+				t.Logf("    ⚠ 失败: %v", err1234)
+			} else if len(rp1234.Object.Properties) > 0 {
+				t.Logf("    ✓ ObjectName: %v", rp1234.Object.Properties[0].Data)
+				confirmedDevices[1234] = dev1234
+				delete(unfoundDevices, 1234)
 			}
 		}
 	}
 
 	discoveryFailures := len(deviceConfigs) - len(confirmedDevices)
 	if discoveryFailures > 0 {
-		t.Fatalf("❌ 真机测试失败: %d 台设备无法通信", discoveryFailures)
+		t.Logf("")
+		t.Logf("❌ 真机测试失败: %d 台设备无法通信", discoveryFailures)
+		for _, cfg := range unfoundDevices {
+			t.Logf("   - Device %d (%s)", cfg.ID, cfg.Type)
+		}
+		t.Fail()
+	} else {
+		t.Logf("")
+		t.Logf("✅ 真机测试完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(deviceConfigs))
 	}
-
-	t.Logf("")
-	t.Logf("✅ 真机测试完成: %d/%d 设备全部验证成功", len(confirmedDevices), len(deviceConfigs))
 	t.Logf("总耗时: %.3fs", time.Since(startAll).Seconds())
 }

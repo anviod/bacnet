@@ -26,8 +26,8 @@ func TestFourDeviceAcceptance(t *testing.T) {
 	deviceConfigs := []DeviceConfig{
 		{ID: 1234, Port: 47810, Type: "room-simulator"},
 		{ID: 2228316, Port: 47808, Type: "Yabe simulator"},
-		{ID: 2228317, Port: 60835, Type: "Yabe simulator"},
-		{ID: 2228318, Port: 50906, Type: "Yabe simulator"},
+		{ID: 2228317, Port: 47808, Type: "Yabe simulator"},
+		{ID: 2228318, Port: 47808, Type: "Yabe simulator"},
 	}
 
 	t.Log("═══════════════════════════════════════════════════════════════")

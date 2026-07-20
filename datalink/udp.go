@@ -134,12 +134,19 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 		}
 	}
 
-	udpAddrStr := fmt.Sprintf("%s:%d", ip.String(), port)
+	// Yabe-style: bind to 0.0.0.0 (INADDR_ANY) to receive broadcast IAm responses.
+	// The official Yabe tool binds to INADDR_ANY so it can receive IAm packets
+	// sent to 255.255.255.255 (global broadcast) by some BACnet simulators.
+	// The NPDU source address still uses the actual IP for correct routing.
+	// Yabe 风格：绑定到 0.0.0.0 (INADDR_ANY) 以接收广播 IAm 响应。
+	// 官方 Yabe 工具绑定到 INADDR_ANY，以便接收某些 BACnet 模拟器
+	// 发送到 255.255.255.255（全局广播）的 IAm 包。
+	// NPDU 源地址仍使用实际 IP 以保证正确路由。
+	udpAddrStr := fmt.Sprintf("0.0.0.0:%d", port)
 
 	// Reusable bind: set SO_REUSEADDR so room-simulator can coexist with YABE on
-	// the same Windows host. When bound to a specific IP, unicast ReadProperty
-	// requests addressed to that IP are delivered to room-simulator; broadcast
-	// Who-Is messages are received by both YABE and room-simulator.
+	// the same Windows host. When bound to INADDR_ANY, broadcast Who-Is messages
+	// and I-Am responses are correctly received regardless of destination address.
 	lc := net.ListenConfig{
 		Control: setReuseUDP,
 	}

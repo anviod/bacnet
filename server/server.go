@@ -83,6 +83,13 @@ type Server interface {
 	// GetDeviceID returns the server's device instance ID.
 	// GetDeviceID 返回服务端的设备实例 ID。
 	GetDeviceID() btypes.ObjectInstance
+
+	// SendIAm sends an I-Am message to the broadcast address with the standard
+	// BACnet port (47808). This allows other BACnet devices (like YABE) to
+	// discover this server even when they're using a different port.
+	// SendIAm 向标准 BACnet 广播地址（47808端口）发送 I-Am 消息。
+	// 这允许其他 BACnet 设备（如 YABE）发现此服务端，即使它们使用不同的端口。
+	SendIAm() error
 }
 
 // DeviceConfig contains the configuration for creating a BACnet server device.
@@ -93,16 +100,16 @@ type DeviceConfig struct {
 	// instance ID; it is NOT rewritten. Use DefaultDeviceConfig() or a nil
 	// cfg to get the conventional demo default of 1000.
 	// DeviceID 为 BACnet 设备实例号（0..4194302）。0 是合法实例，不会被静默改写。
-	DeviceID      btypes.ObjectInstance
-	DeviceName    string                     // BACnet device name
-	VendorID      uint32                     // BACnet vendor identifier
-	Interface     string                     // Network interface name (e.g., "eth0")
-	Ip            string                     // IP address to bind to
-	Port          int                        // BACnet port (default: 47808)
-	SubnetCIDR    int                        // Subnet CIDR (e.g., 24 for /24)
-	MaxPDU        uint16                     // Maximum PDU size (default: 1476)
-	MaxSegments   uint                       // Maximum segments accepted (default: 0 = no segmentation)
-	Segmentation  segmentation.SegmentedType // Segmentation support (default: noSegmentation)
+	DeviceID     btypes.ObjectInstance
+	DeviceName   string                     // BACnet device name
+	VendorID     uint32                     // BACnet vendor identifier
+	Interface    string                     // Network interface name (e.g., "eth0")
+	Ip           string                     // IP address to bind to
+	Port         int                        // BACnet port (default: 47808)
+	SubnetCIDR   int                        // Subnet CIDR (e.g., 24 for /24)
+	MaxPDU       uint16                     // Maximum PDU size (default: 1476)
+	MaxSegments  uint                       // Maximum segments accepted (default: 0 = no segmentation)
+	Segmentation segmentation.SegmentedType // Segmentation support (default: noSegmentation)
 }
 
 // DefaultDeviceConfig returns a DeviceConfig with sensible defaults.
@@ -137,10 +144,12 @@ type server struct {
 // prepares the server for handling BACnet requests.
 //
 // Parameters:
-//   cfg - DeviceConfig containing the server configuration
+//
+//	cfg - DeviceConfig containing the server configuration
 //
 // Returns:
-//   A new Server instance and any error encountered during initialization.
+//
+//	A new Server instance and any error encountered during initialization.
 //
 // 中文说明：NewServer 使用给定的配置创建新的 BACnet 服务端。
 // 初始化数据链路层，创建对象存储，并准备服务端以处理 BACnet 请求。
@@ -472,6 +481,45 @@ func (s *server) handleConfirmed(src *btypes.Address, npdu *btypes.NPDU, apdu *b
 			zap.Uint8("service", uint8(apdu.Service)))
 		s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.ServicesError, bacerr.ServiceRequestDenied)
 	}
+}
+
+// SendIAm sends an I-Am message to the broadcast address with the standard
+// BACnet port (47808). This allows other BACnet devices (like YABE) to
+// discover this server even when they're using a different port.
+func (s *server) SendIAm() error {
+	broadcastAddr := s.dataLink.GetBroadcastAddress()
+
+	iam := btypes.IAm{
+		ID: btypes.ObjectID{
+			Type:     btypes.DeviceType,
+			Instance: s.store.GetDeviceID(),
+		},
+		MaxApdu:      uint32(s.config.MaxPDU),
+		Segmentation: btypes.Enumerated(s.config.Segmentation),
+		Vendor:       s.store.GetVendorID(),
+	}
+
+	enc := encoding.NewEncoder()
+	err := enc.IAm(iam)
+	if err != nil {
+		log.Logger.Error("failed to encode IAm", zap.Error(err))
+		return err
+	}
+
+	_, err = s.sendPacket(broadcastAddr, nil, enc.Bytes(), true)
+	if err != nil {
+		log.Logger.Error("failed to send IAm", zap.Error(err))
+		return err
+	}
+
+	if udpAddr, err := broadcastAddr.UDPAddr(); err == nil {
+		log.Logger.Info("sent IAm broadcast",
+			zap.Uint32("deviceID", uint32(s.store.GetDeviceID())),
+			zap.String("broadcastAddr", udpAddr.String()),
+		)
+	}
+
+	return nil
 }
 
 // handleWhoIs responds to a WhoIs request with an IAm message.
@@ -831,6 +879,7 @@ func (s *server) sendPacket(dest *btypes.Address, reqNPDU *btypes.NPDU, data []b
 		ExpectingReply:        false,
 		Priority:              btypes.Normal,
 		HopCount:              btypes.DefaultHopCount,
+		Source:                s.dataLink.GetMyAddress(),
 	}
 	if reqNPDU != nil {
 		respNPDU.Priority = reqNPDU.Priority

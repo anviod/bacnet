@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/anviod/bacnet/btypes"
-	"github.com/anviod/bacnet/datalink"
 	"github.com/anviod/bacnet/server"
 )
 
@@ -19,7 +18,7 @@ func main() {
 	var (
 		ip         = flag.String("ip", "", "本地绑定 IPv4（推荐填与 YABE 同网段的地址，如 192.168.3.115；空则 0.0.0.0）")
 		iface      = flag.String("iface", "", "网卡名（可选，与 -ip 二选一，如 eth0 / Ethernet）")
-		port       = flag.Int("port", datalink.DefaultPort, "BACnet/IP UDP 端口（默认 47808）")
+		port       = flag.Int("port", 47810, "BACnet/IP UDP 端口（默认 47810，与 YABE 的 47808 分离）")
 		subnet     = flag.Int("subnet", 24, "子网 CIDR（与 -ip 配合，如 24 表示 /24）")
 		deviceID   = flag.Uint("device-id", 1234, "BACnet Device 实例号")
 		deviceName = flag.String("device-name", "Room Simulator", "Device Object_Name")

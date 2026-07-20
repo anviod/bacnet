@@ -2,6 +2,7 @@ package tsm
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -58,24 +59,36 @@ func TestDataTransaction(t *testing.T) {
 		}
 	}
 
+	var wg sync.WaitGroup
+
+	// Send goroutine for first ID
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err = tsm.Send(ids[0], "Hello First ID")
 		if err != nil {
 			t.Error(err)
 		}
 	}()
 
+	// Send goroutine for second ID
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err = tsm.Send(ids[1], "Hello Second ID")
 		if err != nil {
 			t.Error(err)
 		}
 	}()
 
+	// Receive goroutine for first ID (runs in background)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		b, err := tsm.Receive(ids[0], time.Duration(5)*time.Second)
 		if err != nil {
 			t.Error(err)
+			return
 		}
 		s, ok := b.(string)
 		if !ok {
@@ -85,6 +98,7 @@ func TestDataTransaction(t *testing.T) {
 		t.Log(s)
 	}()
 
+	// Receive for second ID in main goroutine
 	b, err := tsm.Receive(ids[1], time.Duration(5)*time.Second)
 	if err != nil {
 		t.Error(err)
@@ -93,7 +107,9 @@ func TestDataTransaction(t *testing.T) {
 	s, ok := b.(string)
 	if !ok {
 		t.Errorf("type was not preseved")
-		return
 	}
 	t.Log(s)
+
+	// Wait for all background goroutines to complete before test returns
+	wg.Wait()
 }

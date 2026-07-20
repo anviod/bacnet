@@ -234,6 +234,8 @@ func UDPToAddress(n *net.UDPAddr) *btypes.Address {
 	a.Mac[net.IPv4len+1] = uint8(p & 0x00FF)
 
 	a.MacLen = uint8(length)
+	a.Adr = a.Mac
+	a.Len = uint8(length)
 	return a
 }
 

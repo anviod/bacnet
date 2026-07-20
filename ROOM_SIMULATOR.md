@@ -14,10 +14,10 @@
 # 编译
 go build -o room-simulator.exe ./cmd/room-simulator
 
-# 同机有 YABE 时：务必用独立端口（推荐）
-./room-simulator.exe -ip 192.168.3.115 -subnet 24 -port 47810 -device-id 1234
+# 同机有 YABE 时：使用默认端口 47810（推荐）
+./room-simulator.exe -ip 192.168.3.115 -subnet 24 -device-id 1234
 
-# 仅当本机 47808 上没有 YABE / 其它 BACnet 程序时，才可用默认端口
+# 仅当本机 47808 上没有 YABE / 其它 BACnet 程序时，才可用 47808
 ./room-simulator.exe -ip 192.168.3.115 -subnet 24 -port 47808 -device-id 1234
 ```
 
@@ -27,18 +27,19 @@ go build -o room-simulator.exe ./cmd/room-simulator
 |------|------|------|
 | `-ip` | `0.0.0.0` | 本地绑定 IPv4；**建议显式填写局域网 IP** |
 | `-iface` | 空 | 网卡名（与 `-ip` 二选一） |
-| `-port` | `47808` | BACnet/IP UDP 端口；**同机 YABE 请改 47810** |
+| `-port` | `47810` | BACnet/IP UDP 端口；**同机 YABE 默认即可** |
 | `-subnet` | `24` | 子网 CIDR（配合 `-ip` 计算广播地址） |
 | `-device-id` | `1234` | Device 实例号 |
 | `-device-name` | `Room Simulator` | Device Object_Name |
 | `-vendor-id` | `999` | Vendor Identifier |
 | `-dynamic` | 关闭 | 缓慢变化 Space Temperature，便于看刷新/COV |
+| `-batch-read` | 关闭 | 每 5 秒通过 `Server.ReadMultiProperty()` 批量读取全部 14 个房间点位的 PresentValue |
 
 直接运行（不编译）：
 
 ```bash
-# 推荐同机联调命令（避开 YABE 的 47808）
-go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24 -port 47810
+# 推荐同机联调命令（默认端口 47810，避开 YABE 的 47808）
+go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24
 ```
 
 ---
@@ -48,22 +49,18 @@ go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24 -port 47810
 1. **同网段**：YABE 所在 PC 与模拟器绑定的 IP 须在同一二层网段（或经 BACnet 路由可达）。
 2. **多网卡**：本机若有 WLAN、有线、Tailscale、Hyper-V 等，务必用 `-ip` 指定正确网卡地址；不要依赖自动选址。
 3. **防火墙**：放行 UDP **你设置的 `-port`**（47808 或 47810）入站/出站。
-4. **同机端口冲突（当前最常见根因）**：
+4. **同机端口分离机制**：
    - YABE 自身常占用本机 `192.168.x.x:47808`。
-   - 若模拟器也绑同一 `IP:47808`，Windows UDP 可能让两个进程“同时”监听。
-   - **症状**：Who-Is / I-Am 偶发成功，但展开 Object_List 失败；YABE 日志出现：
-     ```text
-     Sending ReadPropertyRequest ...
-     ConfirmedServiceRequest
-     Sending ErrorResponse ...
-     Confirmed service not handled: SERVICE_CONFIRMED_READ_PROPERTY
-     Didn't get response from 'Object List'
-     ```
-   - **含义**：这句话**不是**本仓库 Go 服务端打的。它来自 YABE 使用的 `System.IO.BACnet`（`BACnetClient`）：YABE 自己收到了本该发给模拟器的 ReadProperty，却没有注册 `OnReadPropertyRequest`，于是回 Reject/Error 并打上述日志。本模拟器的对应日志是 `unhandled confirmed service`（且 ReadProperty=12 已注册，不会走这条路径）。
-   - **排查**：`netstat -ano | findstr 47808`，若同时看到 `Yabe.exe` 与 `room-simulator.exe`，即冲突。
-   - **处理**：停掉旧模拟器后改用独立端口（见下方复测步骤）。本库已改为 **独占绑定**（Windows `SO_EXCLUSIVEADDRUSE` + 关闭 `SO_REUSEADDR`）：再与 YABE 抢同一 `IP:47808` 时会直接报
-     `bind ... Only one usage of each socket address ... is normally permitted`，而不会再静默抢包。
+   - 模拟器默认绑定 `47810`，与 YABE 的 47808 端口分离，避免单播数据包投递冲突。
+   - **工作原理**：
+     - YABE 发送 Who-Is 广播（目标端口 47808），模拟器通过 SO_REUSEADDR 共享端口接收
+     - 模拟器响应 I-Am 消息，携带完整的源地址（IP:47810）
+     - YABE 收到 I-Am 后记录设备地址，后续 ReadProperty 请求直接发送到 47810
+   - **标准 BACnet 流程**：完全遵循官方流程——YABE 发送 Who-Is → 模拟器响应 I-Am → YABE 读取 Object_List
+   - **症状**：若 YABE 日志出现 `Didn't get response from 'Object List'`，说明 ReadProperty 请求没有到达模拟器，通常是端口配置错误。
+   - **排查**：`netstat -ano | findstr 47810`，确认模拟器在监听 47810 端口。
 5. **广播**：Who-Is 一般为子网广播；绑定错误网卡时 YABE 可能扫不到设备。
+6. **SO_BROADCAST**：Windows 要求 UDP 套接字显式开启 `SO_BROADCAST` 才能发送广播包。本模拟器已在底层 `datalink` 包中自动设置（v0.0.6+），无需用户干预。若在其他平台自行实现 UDP 绑定，务必确认广播权限已开启。
 
 ---
 
@@ -117,21 +114,15 @@ C4 04 C0 00 01                    MSV:1
 
 ## 用 YABE 扫描（同机推荐复测步骤）
 
-1. **停掉**所有旧 `room-simulator` / 官方 `Bacnet.Room.Simulator.exe`：
+1. **启动模拟器**（默认绑定 47810，与 YABE 分离）：
    ```bash
-   # Git Bash / CMD
-   netstat -ano | findstr 47808
-   netstat -ano | findstr 47810
-   # 对 room-simulator 的 PID：taskkill /PID <pid> /F
-   # 或在跑模拟器的终端 Ctrl+C
+   go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24
    ```
-2. **用独立端口启动**（YABE 继续用默认 47808 作本地端点即可；它会按 I-Am 源端口访问设备）：
-   ```bash
-   go run ./cmd/room-simulator -ip 192.168.3.115 -subnet 24 -port 47810
-   ```
-   若仍坚持 47808：先关掉 YABE，或接受 bind 失败（独占绑定）。
-3. 打开 YABE → 选择与模拟器同网段的网卡 → **Who-Is**。
-4. 期望看到 Device `1234` / `Room Simulator`；展开后应列出 Object_List 中的 AI/AV/BI/BO/BV/MSV。
+   模拟器遵循标准 BACnet 流程：只响应 Who-Is 请求，不主动发送 I-Am。
+2. 打开 YABE → 选择与模拟器同网段的网卡 → **Who-Is**。
+3. 期望看到 Device `1234` / `Room Simulator`；展开后应列出 Object_List 中的 AI/AV/BI/BO/BV/MSV。
+4. **可选参数**：
+   - `-port 47808`：使用标准端口（当 47808 未被占用时）
 5. 本库客户端冒烟（不依赖 YABE）：
    ```bash
    go test ./encoding -run 'ObjectList_ReadPropertyAck_GoldenBytes|ObjectList_Index' -count=1 -v

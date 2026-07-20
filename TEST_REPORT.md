@@ -1,8 +1,9 @@
 # BACnet 客户端 / 服务端互操作测试报告
 
-**日期**: 2026-07-13（本轮更新）  
+**日期**: 2026-07-20（本轮更新）  
 **仓库**: `d:\code\GitHub\bacnet`  
 **模块**: `github.com/anviod/bacnet`
+**版本**: v0.0.6
 
 ---
 
@@ -54,10 +55,13 @@
 
 ## 三、本轮相对上一版的变更
 
-1. **COV 打通**：编码层 SubscribeCOV / COV Notification；服务端订阅管理；客户端订阅与接收；UDP 环回互操作测试通过（含取消订阅）。
-2. **DeviceID=0**：去掉 `DeviceID==0 → 1000` 静默改写；`nil`/`DefaultDeviceConfig()` 仍默认 1000；超额实例号报错；单测覆盖。
-3. **分段**：服务端对分段确认请求发送 Abort；单测覆盖。
-4. **文档**：新增真机自测指南；本报告同步更新。
+1. **Windows SO_BROADCAST**（v0.0.6）：`datalink/udp_sockopt_windows.go` 新增 `SO_BROADCAST` 设置。Windows 要求 UDP 套接字显式允许广播，否则 WhoIs 广播包静默失败。与 `SO_REUSEADDR` 组合使用，确保模拟器与 YABE 同机共存时广播正常。
+2. **Server 批量读取**（v0.0.5）：`server/server.go` 新增 `ReadMultiProperty()` 方法，直接查询本地 `ObjectStore` 而无网络传输。`room-simulator` 新增 `-batch-read` 参数，支持 5 秒间隔批量读取全部 14 个房间点位的 PresentValue。
+3. **TSM 测试并发修复**（v0.0.6）：`tsm/transactions_test.go` 中 `TestDataTransaction` 的 goroutine 在测试完成后写入导致 panic，已使用 `sync.WaitGroup` 同步等待所有后台 goroutine 完成。
+4. **COV 打通**（v0.0.4）：编码层 SubscribeCOV / COV Notification；服务端订阅管理；客户端订阅与接收；UDP 环回互操作测试通过（含取消订阅）。
+5. **DeviceID=0**：去掉 `DeviceID==0 → 1000` 静默改写；`nil`/`DefaultDeviceConfig()` 仍默认 1000；超额实例号报错；单测覆盖。
+6. **分段**：服务端对分段确认请求发送 Abort；单测覆盖。
+7. **文档**：新增真机自测指南；本报告同步更新。
 
 ---
 
@@ -68,11 +72,12 @@
 | 包 | 结果 |
 |----|------|
 | `encoding`（含 COV/Abort 编解码） | PASS |
-| `server`（含互操作 + DeviceID + 分段 Abort） | PASS |
-| `network` / `btypes` / `tsm` / `utsm` / helpers | PASS |
+| `server`（含互操作 + DeviceID + 分段 Abort + 批量读取） | PASS |
+| `network` / `btypes` / `btypes/services` / `tsm` / `utsm` / helpers | PASS |
+| `cmd/room-simulator` | PASS |
 | 根包 `TestRealDeviceAcceptanceFlow` | **需真机**（无设备时勿跑或会失败） |
 
-**结论：除真机用例外，自动化测试全部通过。**
+**结论：除真机用例外，全部 10 个有测试的包 100% 通过。**
 
 ### 4.2 客户端 ↔ 服务端 UDP 互操作（`TestClientServerInterop_UDP`）
 

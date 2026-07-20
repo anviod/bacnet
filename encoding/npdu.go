@@ -31,26 +31,24 @@ func (e *Encoder) NPDU(n *btypes.NPDU) {
 	}
 	e.write(meta)
 	if meta.HasDestination() {
-                e.writeUint16(n.Destination.Net)
-                // Address - write actual length
-                addrLen := uint8(len(n.Destination.Adr))
-                e.write(addrLen)
+		e.writeUint16(n.Destination.Net)
+		// Address - write actual length
+		addrLen := uint8(len(n.Destination.Adr))
+		e.write(addrLen)
 
-                // Write address bytes
-                if len(n.Destination.Adr) > 0 {
-                        _, e.err = e.buff.Write(n.Destination.Adr)
-                } else if len(n.Destination.Mac) >= 4 {
-                        _, e.err = e.buff.Write(n.Destination.Mac[:4])
-                        e.write(n.Destination.Id)
+		// Write address bytes
+		if len(n.Destination.Adr) > 0 {
+			_, e.err = e.buff.Write(n.Destination.Adr)
+		} else if len(n.Destination.Mac) >= 4 {
+			_, e.err = e.buff.Write(n.Destination.Mac[:4])
+			e.write(n.Destination.Id)
 		}
 	}
 
 	if meta.HasSource() {
-                e.writeUint16(n.Source.Net)
-                // Address - write actual length
-                addrLen := uint8(len(n.Source.Adr))
-                e.write(addrLen)
-                _, e.err = e.buff.Write(n.Source.Adr)
+		e.writeUint16(n.Source.Net)
+		e.write(uint8(len(n.Source.Adr)))
+		_, e.err = e.buff.Write(n.Source.Adr)
 	}
 
 	// Hop count is after source

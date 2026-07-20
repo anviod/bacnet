@@ -810,6 +810,11 @@ const (
    - 使用 `Destination` 进行单播请求
    - 广播可能无法跨 VLAN 或子网工作
 
+4. **Windows SO_BROADCAST**（v0.0.6+）：
+   - Windows 要求 UDP 套接字显式开启 `SO_BROADCAST` 才能发送广播包
+   - 本库 `datalink` 包已在 Windows 构建中自动设置，无需用户干预
+   - 若自行实现底层 UDP 绑定，务必同时设置 `SO_REUSEADDR` 和 `SO_BROADCAST`
+
 ### 性能优化
 
 1. **批量操作**：

@@ -6,6 +6,7 @@ import (
 	//"log"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/anviod/bacnet/btypes"
 )
@@ -170,8 +171,18 @@ func dataLink(ipAddr string, port int) (DataLink, error) {
 	}, nil
 }
 
+// Close shuts down the UDP listener. On Windows, closing a UDP socket does NOT
+// interrupt a blocking ReadFromUDP call. SetReadDeadline to time.Now() forces
+// ReadFromUDP to return immediately with a timeout error, allowing ClientRun()
+// to exit cleanly. Without this, every ephemeral client scan leaks a goroutine
+// and a UDP socket on Windows.
+// Close 关闭 UDP 监听器。Windows 上关闭 UDP socket 不会中断阻塞的 ReadFromUDP 调用。
+// 设置 SetReadDeadline 为当前时间可强制 ReadFromUDP 立即返回超时错误，
+// 使 ClientRun() 干净退出。否则每次临时客户端扫描都会在 Windows 上泄漏一个 goroutine 和一个 UDP socket。
 func (c *udpDataLink) Close() error {
 	if c.listener != nil {
+		// 强制中断 Windows 上阻塞的 ReadFromUDP，避免 goroutine/socket 泄漏
+		_ = c.listener.SetReadDeadline(time.Now())
 		return c.listener.Close()
 	}
 	return nil

@@ -13,27 +13,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: linux/armv7
-            goos: linux
-            goarch: arm
-            goarm: "7"
-          - label: linux/arm64
-            goos: linux
-            goarch: arm64
-            goarm: ""
           - label: linux/amd64
             goos: linux
             goarch: amd64
             goarm: ""
+          - label: linux/arm64
+            goos: linux
+            goarch: arm64
+            goarm: ""
+          - label: linux/armv7
+            goos: linux
+            goarch: arm
+            goarm: "7"
+          - label: darwin/amd64
+            goos: darwin
+            goarch: amd64
+            goarm: ""
+          - label: darwin/arm64
+            goos: darwin
+            goarch: arm64
+            goarm: ""
           - label: windows/amd64
             goos: windows
             goarch: amd64
+            goarm: ""
+          - label: windows/arm64
+            goos: windows
+            goarch: arm64
             goarm: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Vet
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+        run: go vet ./...
       - name: Build packages
         env:
           CGO_ENABLED: "0"

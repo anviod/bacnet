@@ -5,6 +5,7 @@
 package server
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -385,13 +386,10 @@ func (s *server) ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.Mul
 		}
 
 		for _, reqProp := range reqObj.Properties {
-			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
-			if objType == btypes.DeviceType &&
-				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
-				if !s.store.DevicePropertyExists(objInstance) {
-					continue
-				}
-				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+			// Expand ALL/REQUIRED/OPTIONAL pseudo-properties into concrete ones
+			// for every object type (YABE and other browsers rely on this).
+			if reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL {
+				respObj.Properties = append(respObj.Properties, s.expandObjectProps(objType, objInstance)...)
 				continue
 			}
 
@@ -415,6 +413,30 @@ func (s *server) ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.Mul
 }
 
 // GetObjectStore returns the underlying object store.
+// expandObjectProps 将 ALL/REQUIRED/OPTIONAL 伪属性展开为对象的具体属性列表。
+// Device 返回设备对象全部属性, 其他对象返回存储中的完整属性列表(客户端浏览器如YABE依赖此行为)。
+func (s *server) expandObjectProps(objType btypes.ObjectType, objInstance btypes.ObjectInstance) []btypes.Property {
+	if objType == btypes.DeviceType {
+		if !s.store.DevicePropertyExists(objInstance) {
+			return nil
+		}
+		return s.store.ListDeviceProperties()
+	}
+	obj, ok := s.store.GetObject(objType, objInstance)
+	if !ok {
+		return nil
+	}
+	props := make([]btypes.Property, 0, len(obj.Properties))
+	for _, pr := range obj.Properties {
+		data := pr.Data
+		if pr.Type == btypes.PROP_PRESENT_VALUE {
+			data = normalizePresentValue(objType, data)
+		}
+		props = append(props, btypes.Property{Type: pr.Type, ArrayIndex: pr.ArrayIndex, Data: data})
+	}
+	return props
+}
+
 func (s *server) GetObjectStore() *ObjectStore {
 	return s.store
 }
@@ -772,6 +794,8 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		return
 	}
 
+	log.Logger.Info("RPM request hex", zap.String("hex", hex.EncodeToString(apdu.RawData)))
+
 	// Build response with actual values
 	response := btypes.MultiplePropertyData{
 		Objects: make([]btypes.Object, 0),
@@ -790,13 +814,10 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		}
 
 		for _, reqProp := range reqObj.Properties {
-			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
-			if objType == btypes.DeviceType &&
-				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
-				if !s.store.DevicePropertyExists(objInstance) {
-					continue
-				}
-				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+			// Expand ALL/REQUIRED/OPTIONAL pseudo-properties into concrete ones
+			// for every object type (YABE and other browsers rely on this).
+			if reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL {
+				respObj.Properties = append(respObj.Properties, s.expandObjectProps(objType, objInstance)...)
 				continue
 			}
 
@@ -833,6 +854,7 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		return
 	}
 
+	log.Logger.Info("RPM response hex", zap.String("hex", hex.EncodeToString(enc.Bytes())))
 	_, err = s.sendPacket(src, npdu, enc.Bytes(), false)
 	if err != nil {
 		log.Logger.Error("failed to send ReadMultiplePropertyAck", zap.Error(err))

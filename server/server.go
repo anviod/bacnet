@@ -5,7 +5,6 @@
 package server
 
 import (
-	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -794,8 +793,6 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		return
 	}
 
-	log.Logger.Info("RPM request hex", zap.String("hex", hex.EncodeToString(apdu.RawData)))
-
 	// Build response with actual values
 	response := btypes.MultiplePropertyData{
 		Objects: make([]btypes.Object, 0),
@@ -854,7 +851,6 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		return
 	}
 
-	log.Logger.Info("RPM response hex", zap.String("hex", hex.EncodeToString(enc.Bytes())))
 	_, err = s.sendPacket(src, npdu, enc.Bytes(), false)
 	if err != nil {
 		log.Logger.Error("failed to send ReadMultiplePropertyAck", zap.Error(err))

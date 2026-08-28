@@ -90,6 +90,15 @@ type Server interface {
 	// SendIAm 向标准 BACnet 广播地址（47808端口）发送 I-Am 消息。
 	// 这允许其他 BACnet 设备（如 YABE）发现此服务端，即使它们使用不同的端口。
 	SendIAm() error
+
+	// OnPropertyWrite registers a hook invoked whenever an object property is
+	// written — by a remote client (WriteProperty / WritePropertyMultiple) or
+	// locally via SetProperty. It returns an unsubscribe function. This lets
+	// applications react to client writes instead of polling property values.
+	// OnPropertyWrite 注册属性写入钩子。当远端客户端（WriteProperty /
+	// WritePropertyMultiple）或本地 SetProperty 写入对象属性时触发，
+	// 返回取消注册的函数。应用可借此感知客户端写入，而无需轮询属性值。
+	OnPropertyWrite(hook PropertyWriteHook) func()
 }
 
 // DeviceConfig contains the configuration for creating a BACnet server device.
@@ -128,6 +137,16 @@ func DefaultDeviceConfig() *DeviceConfig {
 	}
 }
 
+// writeHookEntry pairs a registered write hook with a unique ID so that the
+// unsubscribe closure can remove exactly the hook it registered.
+//
+// 中文说明：writeHookEntry 将已注册的写入钩子与唯一 ID 配对，
+// 使取消注册的闭包能够精确移除其注册的钩子。
+type writeHookEntry struct {
+	id   uint64
+	hook PropertyWriteHook
+}
+
 type server struct {
 	mu          sync.RWMutex
 	dataLink    datalink.DataLink
@@ -137,6 +156,10 @@ type server struct {
 	readBufPool sync.Pool
 	running     bool
 	stopCh      chan struct{}
+
+	writeHooksMu sync.Mutex
+	writeHooks   []writeHookEntry
+	writeHookSeq uint64
 }
 
 // NewServer creates a new BACnet server with the given configuration.
@@ -309,7 +332,9 @@ func (s *server) GetObject(objType btypes.ObjectType, instance btypes.ObjectInst
 }
 
 // SetProperty sets a property on an object and notifies COV subscribers when PresentValue changes.
+// Registered write hooks are invoked with a nil Source to mark the write as local.
 func (s *server) SetProperty(objType btypes.ObjectType, instance btypes.ObjectInstance, propType btypes.PropertyType, data interface{}) error {
+	oldValue, _ := s.store.GetProperty(objType, instance, propType)
 	err := s.store.SetProperty(objType, instance, propType, data)
 	if err != nil {
 		return err
@@ -317,6 +342,15 @@ func (s *server) SetProperty(objType btypes.ObjectType, instance btypes.ObjectIn
 	if propType == btypes.PROP_PRESENT_VALUE {
 		s.notifyCOV(objType, instance)
 	}
+	s.fireWriteHooks(PropertyWriteEvent{
+		ObjectType:     objType,
+		ObjectInstance: instance,
+		PropertyType:   propType,
+		ArrayIndex:     btypes.ArrayAll,
+		OldValue:       oldValue,
+		NewValue:       data,
+		Source:         nil,
+	})
 	return nil
 }
 
@@ -351,13 +385,10 @@ func (s *server) ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.Mul
 		}
 
 		for _, reqProp := range reqObj.Properties {
-			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
-			if objType == btypes.DeviceType &&
-				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
-				if !s.store.DevicePropertyExists(objInstance) {
-					continue
-				}
-				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+			// Expand ALL/REQUIRED/OPTIONAL pseudo-properties into concrete ones
+			// for every object type (YABE and other browsers rely on this).
+			if reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL {
+				respObj.Properties = append(respObj.Properties, s.expandObjectProps(objType, objInstance)...)
 				continue
 			}
 
@@ -381,6 +412,30 @@ func (s *server) ReadMultiProperty(data btypes.MultiplePropertyData) (btypes.Mul
 }
 
 // GetObjectStore returns the underlying object store.
+// expandObjectProps 将 ALL/REQUIRED/OPTIONAL 伪属性展开为对象的具体属性列表。
+// Device 返回设备对象全部属性, 其他对象返回存储中的完整属性列表(客户端浏览器如YABE依赖此行为)。
+func (s *server) expandObjectProps(objType btypes.ObjectType, objInstance btypes.ObjectInstance) []btypes.Property {
+	if objType == btypes.DeviceType {
+		if !s.store.DevicePropertyExists(objInstance) {
+			return nil
+		}
+		return s.store.ListDeviceProperties()
+	}
+	obj, ok := s.store.GetObject(objType, objInstance)
+	if !ok {
+		return nil
+	}
+	props := make([]btypes.Property, 0, len(obj.Properties))
+	for _, pr := range obj.Properties {
+		data := pr.Data
+		if pr.Type == btypes.PROP_PRESENT_VALUE {
+			data = normalizePresentValue(objType, data)
+		}
+		props = append(props, btypes.Property{Type: pr.Type, ArrayIndex: pr.ArrayIndex, Data: data})
+	}
+	return props
+}
+
 func (s *server) GetObjectStore() *ObjectStore {
 	return s.store
 }
@@ -697,6 +752,9 @@ func (s *server) handleWriteProperty(src *btypes.Address, npdu *btypes.NPDU, apd
 		return
 	}
 
+	// Capture the previous value for write hooks before committing the write.
+	oldValue, _ := s.store.GetProperty(objType, objInstance, propType)
+
 	// Write the property value
 	err = s.store.SetProperty(objType, objInstance, propType, propValue)
 	if err != nil {
@@ -709,6 +767,17 @@ func (s *server) handleWriteProperty(src *btypes.Address, npdu *btypes.NPDU, apd
 	if propType == btypes.PROP_PRESENT_VALUE {
 		s.notifyCOV(objType, objInstance)
 	}
+
+	s.fireWriteHooks(PropertyWriteEvent{
+		ObjectType:     objType,
+		ObjectInstance: objInstance,
+		PropertyType:   propType,
+		ArrayIndex:     wpData.Object.Properties[0].ArrayIndex,
+		OldValue:       oldValue,
+		NewValue:       propValue,
+		Priority:       wpData.Object.Properties[0].Priority,
+		Source:         src,
+	})
 }
 
 // handleReadMultiProperty processes a ReadPropertyMultiple confirmed service request.
@@ -742,13 +811,10 @@ func (s *server) handleReadMultiProperty(src *btypes.Address, npdu *btypes.NPDU,
 		}
 
 		for _, reqProp := range reqObj.Properties {
-			// Expand ALL/REQUIRED/OPTIONAL on Device into concrete properties.
-			if objType == btypes.DeviceType &&
-				(reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL) {
-				if !s.store.DevicePropertyExists(objInstance) {
-					continue
-				}
-				respObj.Properties = append(respObj.Properties, s.store.ListDeviceProperties()...)
+			// Expand ALL/REQUIRED/OPTIONAL pseudo-properties into concrete ones
+			// for every object type (YABE and other browsers rely on this).
+			if reqProp.Type == btypes.PROP_ALL || reqProp.Type == btypes.PROP_REQUIRED || reqProp.Type == btypes.PROP_OPTIONAL {
+				respObj.Properties = append(respObj.Properties, s.expandObjectProps(objType, objInstance)...)
 				continue
 			}
 
@@ -804,6 +870,7 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 		return
 	}
 
+	var events []PropertyWriteEvent
 	for _, obj := range wmpData.Objects {
 		objType := obj.ID.Type
 		objInstance := obj.ID.Instance
@@ -817,6 +884,8 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 
 		changedPV := false
 		for _, prop := range obj.Properties {
+			// Capture the previous value for write hooks before committing.
+			oldValue, _ := s.store.GetProperty(objType, objInstance, prop.Type)
 			err = s.store.SetProperty(objType, objInstance, prop.Type, prop.Data)
 			if err != nil {
 				s.sendError(src, npdu, apdu.InvokeId, apdu.Service, bacerr.PropertyError, bacerr.WriteAccessDenied)
@@ -825,6 +894,16 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 			if prop.Type == btypes.PROP_PRESENT_VALUE {
 				changedPV = true
 			}
+			events = append(events, PropertyWriteEvent{
+				ObjectType:     objType,
+				ObjectInstance: objInstance,
+				PropertyType:   prop.Type,
+				ArrayIndex:     prop.ArrayIndex,
+				OldValue:       oldValue,
+				NewValue:       prop.Data,
+				Priority:       prop.Priority,
+				Source:         src,
+			})
 		}
 		if changedPV {
 			s.notifyCOV(objType, objInstance)
@@ -832,6 +911,10 @@ func (s *server) handleWriteMultiProperty(src *btypes.Address, npdu *btypes.NPDU
 	}
 
 	s.sendSimpleAck(src, npdu, apdu.InvokeId, btypes.ServiceConfirmedWritePropMultiple)
+
+	for _, evt := range events {
+		s.fireWriteHooks(evt)
+	}
 }
 
 // sendAbort sends a BACnet Abort PDU (e.g. segmentation-not-supported).

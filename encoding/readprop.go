@@ -138,12 +138,20 @@ func (d *Decoder) ReadProperty(data *btypes.PropertyData) error {
 		}
 
 		if openTag == 3 {
-			// We subtract one to ignore the closing tag.
 			datalist := make([]interface{}, 0)
 
-			// There is a closing tag of size 1 byte that we ignore which is why we are
-			// looping until the length is greater than 1
-			for i := 0; d.buff.Len() > 1; i++ {
+			// Read application data until the tag-3 closing tag. A following
+			// context tag (e.g. WriteProperty priority) also ends the value
+			// region and must NOT be swallowed as part of the property value.
+			for d.buff.Len() > 0 {
+				tag, meta := d.tagNumber()
+				if d.err != nil {
+					return d.err
+				}
+				if (meta.isClosing() && tag == 3) || meta.isContextSpecific() {
+					break
+				}
+				_ = d.UnreadByte()
 				data, err := d.AppData()
 				if err != nil {
 					d.err = err

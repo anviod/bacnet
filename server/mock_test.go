@@ -1,6 +1,8 @@
 package server
 
 import (
+	"sync"
+
 	"github.com/anviod/bacnet/btypes"
 )
 
@@ -10,6 +12,7 @@ import (
 // 中文说明：mockDataLink 实现 datalink.DataLink 接口用于测试。
 // 捕获发送的数据并允许注入接收的数据。
 type mockDataLink struct {
+	mu            sync.Mutex
 	myAddr        *btypes.Address
 	broadcastAddr *btypes.Address
 	sentData      [][]byte
@@ -57,6 +60,9 @@ func (m *mockDataLink) GetBroadcastAddress() *btypes.Address {
 }
 
 func (m *mockDataLink) Send(data []byte, npdu *btypes.NPDU, dest *btypes.Address) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	d := make([]byte, len(data))
 	copy(d, data)
 	m.sentData = append(m.sentData, d)
@@ -71,7 +77,10 @@ func (m *mockDataLink) Send(data []byte, npdu *btypes.NPDU, dest *btypes.Address
 }
 
 func (m *mockDataLink) Receive(data []byte) (*btypes.Address, int, error) {
-	if m.closed {
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
 		return nil, 0, nil
 	}
 	pkt, ok := <-m.receiveCh
@@ -86,7 +95,9 @@ func (m *mockDataLink) Receive(data []byte) (*btypes.Address, int, error) {
 }
 
 func (m *mockDataLink) Close() error {
+	m.mu.Lock()
 	m.closed = true
+	m.mu.Unlock()
 	close(m.receiveCh)
 	return nil
 }
@@ -101,6 +112,8 @@ func (m *mockDataLink) injectReceive(addr *btypes.Address, data []byte) {
 
 // getLastSent returns the last sent data packet.
 func (m *mockDataLink) getLastSent() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.sentData) == 0 {
 		return nil
 	}
@@ -109,6 +122,8 @@ func (m *mockDataLink) getLastSent() []byte {
 
 // getLastSentDest returns the last sent destination.
 func (m *mockDataLink) getLastSentDest() *btypes.Address {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.sentDests) == 0 {
 		return nil
 	}
@@ -117,5 +132,7 @@ func (m *mockDataLink) getLastSentDest() *btypes.Address {
 
 // sentCount returns the number of sent packets.
 func (m *mockDataLink) sentCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return len(m.sentData)
 }

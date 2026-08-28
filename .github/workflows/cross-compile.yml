@@ -79,3 +79,17 @@ jobs:
           go test -c -o /tmp/encoding.test ./encoding
           go test -c -o /tmp/server.test ./server
           go test -c -o /tmp/roomsim.test ./cmd/room-simulator
+
+  test:
+    name: Test (native, race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test packages with race detector
+        # Native go test -race over the whole module. Hardware-dependent tests
+        # (requiring devices on 192.168.3.x) are guarded by the "integration"
+        # build tag and therefore excluded here, so the suite passes on CI.
+        run: go test -race ./...

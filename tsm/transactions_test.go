@@ -60,56 +60,42 @@ func TestDataTransaction(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	recvStarted := make(chan struct{}, size)
 
-	// Send goroutine for first ID
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = tsm.Send(ids[0], "Hello First ID")
-		if err != nil {
-			t.Error(err)
-		}
-	}()
-
-	// Send goroutine for second ID
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		err = tsm.Send(ids[1], "Hello Second ID")
-		if err != nil {
-			t.Error(err)
-		}
-	}()
-
-	// Receive goroutine for first ID (runs in background)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		b, err := tsm.Receive(ids[0], time.Duration(5)*time.Second)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		s, ok := b.(string)
-		if !ok {
-			t.Errorf("type was not preseved")
-			return
-		}
-		t.Log(s)
-	}()
-
-	// Receive for second ID in main goroutine
-	b, err := tsm.Receive(ids[1], time.Duration(5)*time.Second)
-	if err != nil {
-		t.Error(err)
+	// Start every receive goroutine first so each blocks on tsm.Receive before
+	// any Send happens. tsm.Send is non-blocking, so without a bounded ordering
+	// this test would fail when -race slows the scheduler down.
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			recvStarted <- struct{}{}
+			b, err := tsm.Receive(id, time.Duration(5)*time.Second)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			s, ok := b.(string)
+			if !ok {
+				t.Errorf("type was not preserved")
+				return
+			}
+			t.Log(s)
+		}(id)
 	}
 
-	s, ok := b.(string)
-	if !ok {
-		t.Errorf("type was not preseved")
+	// Give the receive goroutines time to reach their blocking receive.
+	for i := 0; i < size; i++ {
+		<-recvStarted
 	}
-	t.Log(s)
+	time.Sleep(100 * time.Millisecond)
 
-	// Wait for all background goroutines to complete before test returns
+	// Now send to each ID; the matching receiver is already blocked in tsm.Receive.
+	for _, id := range ids {
+		if err := tsm.Send(id, "Hello ID %d"); err != nil {
+			t.Errorf("send to id %d failed: %v", id, err)
+		}
+	}
+
 	wg.Wait()
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anviod/bacnet/btypes"
@@ -111,7 +112,7 @@ type client struct {
 	tsm            *tsm.TSM
 	utsm           *utsm.Manager
 	readBufferPool sync.Pool
-	running        bool
+	running        atomic.Bool
 	covCh          chan btypes.COVNotification
 }
 
@@ -219,7 +220,7 @@ func NewClient(cb *ClientBuilder) (Client, error) {
 // 在进行任何 BACnet 请求之前，应在 goroutine 中调用此方法。
 func (c *client) ClientRun() {
 	var err error = nil
-	c.running = true
+	c.running.Store(true)
 	for err == nil {
 		b := c.readBufferPool.Get().([]byte)
 		var addr *btypes.Address
@@ -230,7 +231,7 @@ func (c *client) ClientRun() {
 		}
 		go c.handleMsg(addr, b[:n])
 	}
-	c.running = false
+	c.running.Store(false)
 }
 
 func (c *client) handleMsg(src *btypes.Address, b []byte) {
@@ -420,10 +421,10 @@ func (c *client) Close() error {
 	if c.dataLink != nil {
 		c.dataLink.Close()
 	}
-	c.running = false
+	c.running.Store(false)
 	return nil
 }
 
 func (c *client) IsRunning() bool {
-	return c.running
+	return c.running.Load()
 }

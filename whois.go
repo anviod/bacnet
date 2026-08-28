@@ -101,8 +101,8 @@ func (c *client) WhoIs(wh *WhoIsOpts) ([]btypes.Device, error) {
 	errChan := make(chan error)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		_, err = c.Send(dest, npdu, enc.Bytes(), nil)
-		errChan <- err
+		_, sendErr := c.Send(dest, npdu, enc.Bytes(), nil)
+		errChan <- sendErr
 	}()
 	values, err := c.utsm.Subscribe(start, end)
 	if err != nil {
